@@ -71,10 +71,10 @@ def read_metadata(fobj):
 
 # Turn the string 'L2-BZIP2/KFTG/20150908215946/494/43/I/V06/0' into useful information
 ProdInfo = namedtuple('ProdInfo',
-                      'format site datetime volume_id chunk_id chunk_type version unused')
+                      'format site dt volume_id chunk_id chunk_type version unused')
 def parse_prod_info(s):
     pi = ProdInfo(*s.split('/'))
-    return pi._replace(datetime=datetime.strptime(pi.datetime, '%Y%m%d%H%M%S'),
+    return pi._replace(dt=datetime.strptime(pi.dt, '%Y%m%d%H%M%S'),
                        chunk_id=int(pi.chunk_id))
 
 
@@ -184,7 +184,7 @@ class ChunkStore(object):
     def add_header(self, info):
         if not self.vol_hdr:
             version = b'AR2V00' + info.version[1:] + b'.' + info.volume_id
-            timestamp = (info.datetime - datetime(1970, 1, 1)).total_seconds()
+            timestamp = (info.dt - datetime(1970, 1, 1)).total_seconds()
             date = int(timestamp // 86400)
             time = int(timestamp - date * 86400)
             logger.warn('Creating volume header for first chunk: %s %d %d %s', version,
@@ -302,7 +302,7 @@ if __name__ == '__main__':
             prod_id, prod_length = read_metadata(read_in)
             prod_info = parse_prod_info(prod_id)
             logger.debug('Handling chunk {0.chunk_id} ({0.chunk_type}) for {0.site} '
-                        '{0.volume_id} {0.datetime}'.format(prod_info))
+                        '{0.volume_id} {0.dt}'.format(prod_info))
             data = check_read(read_in, prod_length)
             logger.debug('Read chunk.')
         except EOFError:
@@ -317,8 +317,8 @@ if __name__ == '__main__':
 
     # Any time we kick out, write the data if we have some
     if chunks and prod_info:
-        subdir = '{0.site}/{0.datetime:%Y%m%d}'.format(prod_info)
-        fname = 'Level2_{0.site}_{0.datetime:%Y%m%d}_{0.datetime:%H%M}.ar2v'.format(prod_info)
+        subdir = '{0.site}/{0.dt:%Y%m%d}'.format(prod_info)
+        fname = 'Level2_{0.site}_{0.dt:%Y%m%d}_{0.dt:%H%M%S}.ar2v'.format(prod_info)
         logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
                     chunks.last, len(chunks), ' '.join(chunks.missing()))
 
