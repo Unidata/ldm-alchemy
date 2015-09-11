@@ -323,14 +323,16 @@ if __name__ == '__main__':
 
     # Any time we kick out, write the data if we have some
     if chunks and prod_info:
-        subdir = args.path.format(prod_info)
+        # Determine file name
         fname = args.filename.format(prod_info)
         logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
                     chunks.last, len(chunks), ' '.join(chunks.missing()))
 
         # Create the output dir if necessary
+        subdir = args.path.format(prod_info)
         out_dir = os.path.join(args.data_dir, subdir)
         if not os.path.exists(out_dir):
+            logger.debug('Creating dir: %s', out_dir)
             os.makedirs(out_dir)
 
         # Add header if necessary
