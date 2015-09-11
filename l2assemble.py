@@ -211,8 +211,9 @@ def write_file(fname, chunks, format):
 
     # Check to make sure the file doesn't already exist
     if os.path.exists(outname):
-        outname = fname + '.%03d' % chunks.max_id() + ext
-        logger.error('%s already exists!. Falling back to %s.')
+        newname = fname + '.%03d' % chunks.max_id() + ext
+        logger.error('%s already exists!. Falling back to %s.', outname, newname)
+        outname = newname
 
     # Write it out
     with writer(outname, 'wb') as outf:
