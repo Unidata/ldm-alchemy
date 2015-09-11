@@ -150,6 +150,9 @@ class ChunkStore(object):
     def __len__(self):
         return len(self._store)
 
+    def max_id(self):
+        return max(self._store.keys())
+
     # Iterate in the order of the keys, but only return the value
     def __iter__(self):
         return iter(i[1] for i in sorted(self._store.items()))
@@ -200,9 +203,16 @@ data_handlers = dict(gz=(gzip.open, bz2_decomp, '.gz'), bz2=(bz2.BZ2File, bz2_de
                      raw=(open, lambda c: c, ''))
 def write_file(fname, chunks, format):
     writer, decomp, ext = data_handlers[format]
+    outname = fname + ext
+    logger.debug('Writing %s format to %s', format, outname)
 
-    logger.debug('Writing %s format to %s', format, fname + ext)
-    with writer(fname + ext, 'wb') as outf:
+    # Check to make sure the file doesn't already exist
+    if os.path.exists(outname):
+        outname = fname + '.%03d' % chunks.max_id() + ext
+        logger.error('%s already exists!. Falling back to %s.')
+
+    # Write it out
+    with writer(outname, 'wb') as outf:
         # Write the volume header if we have one
         if chunks.vol_hdr:
             outf.write(chunks.vol_hdr)
