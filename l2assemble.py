@@ -161,7 +161,10 @@ class ChunkStore(object):
     def add(self, chunk_id, chunk_type, chunk):
         max_id = self.max_id()
         if chunk_id != max_id + 1:
-            logger.warn('Chunks out of order--Got: %d Max: %d', chunk_id, max_id)
+            if chunk_id in self._store:
+                logger.warn('Duplicate chunk: %d', chunk_id)
+            else:
+                logger.warn('Chunks out of order--Got: %d Max: %d', chunk_id, max_id)
 
         # Not only do we need to note the first block, we need to pop off the header
         # bytes
