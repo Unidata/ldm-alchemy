@@ -151,7 +151,7 @@ class ChunkStore(object):
         return len(self._store)
 
     def max_id(self):
-        return max(self._store.keys())
+        return max(self._store.keys()) if self._store else 0
 
     # Iterate in the order of the keys, but only return the value
     def __iter__(self):
@@ -159,7 +159,7 @@ class ChunkStore(object):
 
     # Add a chunk to our store. If this was the start or end, note that as well.
     def add(self, chunk_id, chunk_type, chunk):
-        max_id = max(self._store.keys()) if self._store else 0
+        max_id = self.max_id()
         if chunk_id != max_id + 1:
             logger.warn('Chunks out of order--Got: %d Max: %d', chunk_id, max_id)
 
