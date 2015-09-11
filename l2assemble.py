@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 
 
 # Set up logging
-def init_logger():
+def init_logger(site, volnum):
     # Set the global logger
     global logger
     logger = logging.getLogger('Level2Handler')
@@ -33,7 +33,8 @@ def init_logger():
     except FileNotFoundError:
         handler = logging.StreamHandler()
 
-    handler.setFormatter(logging.Formatter(fmt='%(filename)s [%(process)d]: %(message)s'))
+    fmt = '%(filename)s [%(process)d]: ' + '[%s %03d]' % (site, volnum) + ' %(message)s'
+    handler.setFormatter(logging.Formatter(fmt=fmt))
     logger.addHandler(handler)
 
 
@@ -241,9 +242,9 @@ if __name__ == '__main__':
     import argparse
     import select
 
-    init_logger()
     parser = setup_arg_parser()
     args = parser.parse_args()
+    init_logger(args.site, args.volume_number)
 
     # Figure out how noisy we should be. Start by clipping between -2 and 2.
     total_level = min(2, max(-2, args.quiet - args.verbose))
@@ -305,8 +306,8 @@ if __name__ == '__main__':
     if chunks and prod_info:
         subdir = '{0.site}/{0.datetime:%Y%m%d}'.format(prod_info)
         fname = 'Level2_{0.site}_{0.datetime:%Y%m%d}_{0.datetime:%H%M}.ar2v'.format(prod_info)
-        logger.info('Writing file: %s (start: %d end: %d total: %d missing: [%s])', fname,
-                    chunks.first, chunks.last, len(chunks), ' '.join(chunks.missing()))
+        logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
+                    chunks.last, len(chunks), ' '.join(chunks.missing()))
 
         # Create the output dir if necessary
         out_dir = os.path.join(args.data_dir, subdir)
