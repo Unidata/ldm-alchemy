@@ -248,8 +248,11 @@ def setup_arg_parser():
                                                 'multiple times.', action='count', default=0)
     parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
                                               'multiple times.', action='count', default=0)
-    parser.add_argument('-p', '--path', help='Path format for storing data. Uses Python '
-                        'format specification', default='{0.site}/{0.dt:%Y%m%d}')
+    parser.add_argument('-p', '--path', help='Path format =string. Uses Python '
+                        'string format specification', default='{0.site}/{0.dt:%Y%m%d}')
+    parser.add_argument('-n', '--filename', help='Filename format string. Uses Python '
+                        'string format specification',
+                        default='Level2_{0.site}_{0.dt:%Y%m%d}_{0.dt:%H%M%S}.ar2v')
     parser.add_argument('site', help='Site ID for volume', type=str)
     parser.add_argument('volume_number', help='Volume number for file', type=int)
     return parser
@@ -321,7 +324,7 @@ if __name__ == '__main__':
     # Any time we kick out, write the data if we have some
     if chunks and prod_info:
         subdir = args.path.format(prod_info)
-        fname = 'Level2_{0.site}_{0.dt:%Y%m%d}_{0.dt:%H%M%S}.ar2v'.format(prod_info)
+        fname = args.filename.format(prod_info)
         logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
                     chunks.last, len(chunks), ' '.join(chunks.missing()))
 
