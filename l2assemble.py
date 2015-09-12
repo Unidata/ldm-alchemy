@@ -80,13 +80,13 @@ def parse_prod_info(s):
 
 
 def cache_dir(base_dir, site, vol_num):
-    return os.path.join(base_dir, site, '.%03d' % vol_num)
+    return os.path.join(base_dir, '.' + site, '.%03d' % vol_num)
 
 
 def clear_old_caches(base_dir, site, cur_vol):
     logger.debug('Checking for old caches...')
     # List all old cache directories for this site
-    for fname in glob.glob(os.path.join(base_dir, site, '.[0-9][0-9][0-9]')):
+    for fname in glob.glob(os.path.join(base_dir, '.' + site, '.[0-9][0-9][0-9]')):
         if os.path.isdir(fname):  # Minor sanity check that this is ours
             logger.debug('Found: %s', fname)
 
