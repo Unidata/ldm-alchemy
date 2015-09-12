@@ -299,6 +299,7 @@ if __name__ == '__main__':
         # Kick out if we time out
         if not info:
             logger.warn('Finishing due to time out.')
+            need_more = False
             break
 
         # Read metadata from LDM for prod id and product size, then read in the appropriate
@@ -321,8 +322,8 @@ if __name__ == '__main__':
         # Add the chunk, let it control whether we continue
         need_more = chunks.add(prod_info.chunk_id, prod_info.chunk_type, data)
 
-    # Any time we kick out, write the data if we have some
-    if chunks and prod_info:
+    # When we kick out without needing more, write the data if we have some
+    if (not need_more) and chunks and prod_info:
         # Determine file name
         fname = args.filename.format(prod_info)
         logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
