@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import os
 import os.path
+import shutil
 import struct
 import sys
 import traceback
@@ -277,7 +278,6 @@ if __name__ == '__main__':
     # Check to see if we have previously written part to disk:
     cache = cache_dir(args.data_dir, args.site, args.volume_number)
     if os.path.exists(cache):
-        import shutil
         logger.debug('Loading previously stored chunks from: %s', cache)
         chunks = ChunkStore.loadfromdir(cache)
 
