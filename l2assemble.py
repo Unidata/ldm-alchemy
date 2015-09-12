@@ -12,7 +12,7 @@ import sys
 import traceback
 
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 # Set up logging
@@ -125,7 +125,7 @@ class ChunkStore(object):
 
     def savetodir(self, path):
         # Get all the chunks
-        chunk_ids = self._store.keys()
+        chunk_ids = list(self._store.keys())
 
         # Create the directory if necessary
         if not os.path.exists(path):
@@ -253,7 +253,7 @@ def setup_arg_parser():
                         'string format specification', default='{0.site}/{0.dt:%Y%m%d}')
     parser.add_argument('-n', '--filename', help='Filename format string. Uses Python '
                         'string format specification',
-                        default='Level2_{0.site}_{0.dt:%Y%m%d}_{0.dt:%H%M%S}.ar2v')
+                        default='Level2_{0.site}_{0.dt:%Y%m%d_%H%M%S}.ar2v')
     parser.add_argument('site', help='Site ID for volume', type=str)
     parser.add_argument('volume_number', help='Volume number for file', type=int)
     return parser
@@ -268,12 +268,7 @@ if __name__ == '__main__':
 
     # Figure out how noisy we should be. Start by clipping between -2 and 2.
     total_level = min(2, max(-2, args.quiet - args.verbose))
-    logger.setLevel(30 + total_level * 10) # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
-
-    # Reading from standard in. Set up a poll so we can timeout waiting for data
-    read_in = os.fdopen(sys.stdin.fileno(), 'rb')
-    poll_in = select.poll()
-    poll_in.register(read_in, select.POLLIN)
+    logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
 
     # Check to see if we have previously written part to disk:
     cache = cache_dir(args.data_dir, args.site, args.volume_number)
@@ -292,6 +287,11 @@ if __name__ == '__main__':
     need_more = True
     prod_info = None
 
+    # Reading from standard in. Set up a poll so we can timeout waiting for data
+    read_in = os.fdopen(sys.stdin.fileno(), 'rb')
+    poll_in = select.poll()
+    poll_in.register(read_in, select.POLLIN | select.POLLHUP)
+
     while need_more:
         # Time out after 5 minutes
         info = poll_in.poll(args.timeout * 1000)
@@ -308,7 +308,7 @@ if __name__ == '__main__':
             prod_id, prod_length = read_metadata(read_in)
             prod_info = parse_prod_info(prod_id)
             logger.debug('Handling chunk {0.chunk_id} ({0.chunk_type}) for {0.site} '
-                        '{0.volume_id} {0.dt}'.format(prod_info))
+                         '{0.volume_id} {0.dt}'.format(prod_info))
             data = check_read(read_in, prod_length)
             logger.debug('Read chunk.')
         except EOFError:
