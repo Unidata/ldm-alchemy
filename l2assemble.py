@@ -209,40 +209,82 @@ class ChunkStore(object):
         return map(str, set(range(1, self.last + 1)) - set(self._store.keys()))
 
 
-def bz2_decomp(chunk):
-    return bz2.decompress(chunk[4:])
-
-
-# Write the file in the specified format. For gz/bz2 we decompress the blocks, then
-# compress the file. For raw, no decompression, write block as is.
-data_handlers = dict(gz=(gzip.open, bz2_decomp, '.gz'), bz2=(bz2.BZ2File, bz2_decomp, '.bz2'),
-                     raw=(open, lambda c: c, ''))
-def write_file(fname, chunks, format):
-    writer, decomp, ext = data_handlers[format]
-    outname = fname + ext
-    logger.debug('Writing %s format to %s', format, outname)
-
-    # Check to make sure the file doesn't already exist
-    if os.path.exists(outname):
-        newname = fname + '.%03d' % chunks.max_id() + ext
-        logger.error('%s already exists!. Falling back to %s.', outname, newname)
-        outname = newname
-
-    # Write it out
-    with writer(outname, 'wb') as outf:
-        # Write the volume header if we have one
-        if chunks.vol_hdr:
-            outf.write(chunks.vol_hdr)
+class ChunkWriter(object):
+    def __init__(self, fobj, fmt):
+        self.fobj = fobj
+        if fmt == 'raw':
+            self._process_chunk = lambda chunk: chunk
         else:
-            logger.error('Missing volume header for: %s', fname)
+            if fmt == 'gz':
+                self.fobj = gzip.GzipFile(fileobj=fobj, mode='wb')
+            elif fmt == 'bz2':
+                self.fobj = bz2.BZ2File(fobj, mode='wb')
+            self._process_chunk = lambda chunk: bz2.decompress(chunk[4:])
 
-        # Write the data chunks
-        for num, chunk in enumerate(chunks):
-            try:
-                # Need to skip first 4 bytes which contain the size of the block
-                outf.write(decomp(chunk))
-            except (OSError, IOError):
-                logger.error('Error decompressing chunk: %d', num)
+    def write(self, data):
+        self.fobj.write(data)
+
+    def write_chunk(self, chunk):
+        self.write(self._process_chunk(chunk))
+
+
+class DiskFile(object):
+    def __init__(self, base_dir, path, name):
+        # Create the output dir if necessary
+        out_dir = os.path.join(base_dir, path)
+        if not os.path.exists(out_dir):
+            logger.debug('Creating dir: %s', out_dir)
+            os.makedirs(out_dir)
+
+        # Check to make sure the file doesn't already exist
+        outname = os.path.join(out_dir, name)
+        if os.path.exists(outname):
+            newname = outname + '.%03d' % chunks.max_id()
+            logger.error('%s already exists!. Falling back to %s.', outname, newname)
+            outname = newname
+
+        self._fobj = open(outname, 'wb')
+
+    def writable(self):
+        return True
+
+    def write(self, data):
+        return self._fobj.write(data)
+
+    def close(self):
+        self._fobj.close()
+
+
+class S3File(DiskFile):
+    def __init__(self, bucket_name, path, name):
+        import boto3
+        from io import BytesIO
+
+        logger.debug('Writing to S3 bucket: %s', bucket_name)
+        s3 = boto3.resource('s3')
+        self._bucket = s3.Bucket(bucket_name)
+        self._key = path + '/' + name
+        self._fobj = BytesIO()
+
+    def close(self):
+        super(S3File, self).close()
+        logger.info('Uploading to S3 under key: %s', self._key)
+        self._bucket.put_object(Key=self._key, Body=self._fobj.getvalue())
+
+
+def write_file(writer, chunks):
+    # Write the volume header if we have one
+    if chunks.vol_hdr:
+        writer.write(chunks.vol_hdr)
+    else:
+        logger.error('Missing volume header for: %s', fname)
+
+    # Write the data chunks
+    for num, chunk in enumerate(chunks):
+        try:
+            writer.write_chunk(chunk)
+        except (OSError, IOError):
+            logger.error('Error writing chunk: %d', num)
 
 
 def setup_arg_parser():
@@ -251,6 +293,8 @@ def setup_arg_parser():
                                      ' and assemble when they are done arriving.')
     parser.add_argument('-d', '--data_dir', help='Base output directory', type=str,
                         default='/data/ldm/pub/native/radar/level2')
+    parser.add_argument('-s', '--s3', help='Write to specified S3 bucket rather than disk.',
+                        type=str)
     parser.add_argument('-f', '--format', help='Format for output', type=str,
                         choices=('raw', 'bz2', 'gz'), default='raw')
     parser.add_argument('-g', '--generate_header', help='Generate volume header if missing',
@@ -335,23 +379,28 @@ if __name__ == '__main__':
         need_more = chunks.add(prod_info.chunk_id, prod_info.chunk_type, data)
 
     # When we kick out without needing more, write the data if we have some
-    if (not need_more) and chunks and prod_info:
-        # Determine file name
-        fname = args.filename.format(prod_info)
-        logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
-                    chunks.last, len(chunks), ' '.join(chunks.missing()))
+    if chunks and prod_info:
+        if not need_more:
+            # Determine file name
+            fname = args.filename.format(prod_info)
+            if args.format != 'raw':
+                fname += '.' + args.format
 
-        # Create the output dir if necessary
-        subdir = args.path.format(prod_info)
-        out_dir = os.path.join(args.data_dir, subdir)
-        if not os.path.exists(out_dir):
-            logger.debug('Creating dir: %s', out_dir)
-            os.makedirs(out_dir)
+            path = args.path.format(prod_info)
+            logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
+                        chunks.last, len(chunks), ' '.join(chunks.missing()))
 
-        # Add header if necessary
-        if args.generate_header:
-            chunks.add_header(prod_info)
+            # Set up end place file will be written to
+            if args.s3:
+                file = S3File(args.S3, path, fname)
+            else:
+                file = DiskFile(args.data_dir, path, fname)
 
-        write_file(os.path.join(out_dir, fname), chunks, args.format)
+            # Add header if necessary
+            if args.generate_header:
+                chunks.add_header(prod_info)
+
+            cw = ChunkWriter(file, args.format)
+            write_file(cw, chunks)
     else:
         logger.error('Exiting without doing anything!')
