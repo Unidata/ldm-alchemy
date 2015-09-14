@@ -7,12 +7,20 @@ import logging.handlers
 import os
 import os.path
 import shutil
+import socket
 import struct
 import sys
 import traceback
 
 from collections import namedtuple
 from datetime import datetime
+
+
+# Fix some name problems
+try:
+    FileNotFoundError
+except NameError:
+    FileNotFoundError = object
 
 
 # Set up logging
@@ -22,21 +30,21 @@ def init_logger(site, volnum):
     logger = logging.getLogger('Level2Handler')
     logger.setLevel(logging.DEBUG)
 
-    # Set up a system exception hook for logging exceptions
-    def log_uncaught_exceptions(ex_cls, ex, tb):
-        logger.critical(''.join(traceback.format_tb(tb)))
-        logger.critical('{0}: {1}'.format(ex_cls, ex))
-    sys.excepthook = log_uncaught_exceptions
-
     # Send logs to LDM's log if possible, otherwise send to stderr.
     try:
         handler = logging.handlers.SysLogHandler(address='/dev/log', facility='local0')
-    except FileNotFoundError:
+    except (FileNotFoundError, socket.error):
         handler = logging.StreamHandler()
 
     fmt = '%(filename)s [%(process)d]: ' + '[%s %03d]' % (site, volnum) + ' %(message)s'
     handler.setFormatter(logging.Formatter(fmt=fmt))
     logger.addHandler(handler)
+
+    # Set up a system exception hook for logging exceptions
+    def log_uncaught_exceptions(ex_cls, ex, tb):
+        logger.critical(''.join(traceback.format_tb(tb)))
+        logger.critical('{0}: {1}'.format(ex_cls, ex))
+    sys.excepthook = log_uncaught_exceptions
 
 
 def log_rmtree_error(func, path, exc):
