@@ -141,17 +141,21 @@ class ChunkStore(object):
 
         # Handle first and last separately
         if self.first != -1:
+            logger.warn('Saving first chunk: %d', self.first)
             chunk_ids.remove(self.first)
             with open(os.path.join(path, '%03dS' % self.first), 'wb') as outf:
                 outf.write(self.vol_hdr)
                 outf.write(self._store[self.first])
 
         if self.last != -1:
+            logger.warn('Saving last chunk: %d', self.last)
             chunk_ids.remove(self.last)
             with open(os.path.join(path, '%03dE' % self.last), 'wb') as outf:
                 outf.write(self._store[self.last])
 
         # Write the rest
+        logger.warn('Saving remaining %d (of %d) chunks: [%s]', len(chunk_ids),
+                    len(self._store), ' '.join(map(str, chunk_ids)))
         for chunk_id in chunk_ids:
             with open(os.path.join(path, '%03dI' % chunk_id), 'wb') as outf:
                 outf.write(self._store[chunk_id])
@@ -257,7 +261,7 @@ def setup_arg_parser():
                                                 'multiple times.', action='count', default=0)
     parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
                                               'multiple times.', action='count', default=0)
-    parser.add_argument('-p', '--path', help='Path format =string. Uses Python '
+    parser.add_argument('-p', '--path', help='Path format string. Uses Python '
                         'string format specification', default='{0.site}/{0.dt:%Y%m%d}')
     parser.add_argument('-n', '--filename', help='Filename format string. Uses Python '
                         'string format specification',
