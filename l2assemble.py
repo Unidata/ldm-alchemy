@@ -277,10 +277,10 @@ class S3File(DiskFile):
         self._fallback_num = fallback_num
 
     def _exists(self, obj):
-        import boto3
+        import botocore
         try:
             obj.version_id
-        except boto3.ClientError as e:
+        except botocore.exceptions.ClientError as e:
             error_code = int(e.response['Error']['Code'])
             if error_code == 404:
                 return False
