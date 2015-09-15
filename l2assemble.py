@@ -13,6 +13,7 @@ import sys
 import traceback
 
 from collections import namedtuple
+from contextlib import closing
 from datetime import datetime
 
 
@@ -42,6 +43,7 @@ def init_logger(site, volnum):
 
     # Set up a system exception hook for logging exceptions
     def log_uncaught_exceptions(ex_cls, ex, tb):
+        global logger
         logger.critical(''.join(traceback.format_tb(tb)))
         logger.critical('{0}: {1}'.format(ex_cls, ex))
     sys.excepthook = log_uncaught_exceptions
@@ -163,6 +165,9 @@ class ChunkStore(object):
     def __len__(self):
         return len(self._store)
 
+    def min_id(self):
+        return min(self._store.keys()) if self._store else 0
+
     def max_id(self):
         return max(self._store.keys()) if self._store else 0
 
@@ -229,7 +234,7 @@ class ChunkWriter(object):
 
 
 class DiskFile(object):
-    def __init__(self, base_dir, path, name):
+    def __init__(self, base_dir, path, name, fallback_num):
         # Create the output dir if necessary
         out_dir = os.path.join(base_dir, path)
         if not os.path.exists(out_dir):
@@ -239,11 +244,15 @@ class DiskFile(object):
         # Check to make sure the file doesn't already exist
         outname = os.path.join(out_dir, name)
         if os.path.exists(outname):
-            newname = outname + '.%03d' % chunks.max_id()
-            logger.error('%s already exists!. Falling back to %s.', outname, newname)
-            outname = newname
+            outname = self.fallback(outname, fallback_num)
 
         self._fobj = open(outname, 'wb')
+
+    @staticmethod
+    def fallback(outname, fallback_num):
+        newname = outname + '.%03d' % fallback_num
+        logger.error('%s already exists!. Falling back to %s.', outname, newname)
+        return newname
 
     def writable(self):
         return True
@@ -256,7 +265,7 @@ class DiskFile(object):
 
 
 class S3File(DiskFile):
-    def __init__(self, bucket_name, path, name):
+    def __init__(self, bucket_name, path, name, fallback_num):
         import boto3
         from io import BytesIO
 
@@ -265,11 +274,35 @@ class S3File(DiskFile):
         self._bucket = s3.Bucket(bucket_name)
         self._key = path + '/' + name
         self._fobj = BytesIO()
+        self._fallback_num = fallback_num
+
+    def _exists(self, obj):
+        import boto3
+        try:
+            obj.version_id
+        except boto3.ClientError as e:
+            error_code = int(e.response['Error']['Code'])
+            if error_code == 404:
+                return False
+        return True
 
     def close(self):
+        import hashlib
+        data = self._fobj.getvalue()
+
+        # Calculate MD5 checksum for integrity
+        digest = hashlib.md5(data).digest().encode('base64').rstrip()
+
+        # Get the object and try to make sure it doesn't exist
+        obj = self._bucket.Object(self._key)
+        if self._exists(obj):
+            obj = self._bucket.Object(self.fallback(self._key, self._fallback_num))
+
+        # Upload to S3
+        logger.info('Uploading to S3 under key: %s (md5: %s)', obj.key, digest)
+        resp = obj.put(Body=data, ContentMD5=digest.rstrip())
+        logger.debug('PUT Response: %s', str(resp))
         super(S3File, self).close()
-        logger.info('Uploading to S3 under key: %s', self._key)
-        self._bucket.put_object(Key=self._key, Body=self._fobj.getvalue())
 
 
 def write_file(writer, chunks):
@@ -390,17 +423,18 @@ if __name__ == '__main__':
             logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
                         chunks.last, len(chunks), ' '.join(chunks.missing()))
 
-            # Set up end place file will be written to
-            if args.s3:
-                file = S3File(args.S3, path, fname)
-            else:
-                file = DiskFile(args.data_dir, path, fname)
-
             # Add header if necessary
             if args.generate_header:
                 chunks.add_header(prod_info)
 
-            cw = ChunkWriter(file, args.format)
-            write_file(cw, chunks)
+            # Set up end place file will be written to
+            if args.s3:
+                file = S3File(args.s3, path, fname, chunks.min_id())
+            else:
+                file = DiskFile(args.data_dir, path, fname, chunks.min_id())
+
+            with closing(file):
+                cw = ChunkWriter(file, args.format)
+                write_file(cw, chunks)
     else:
         logger.error('Exiting without doing anything!')
