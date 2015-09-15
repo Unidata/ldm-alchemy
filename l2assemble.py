@@ -342,8 +342,8 @@ def setup_arg_parser():
                         type=str)
     parser.add_argument('-k', '--key', help='Key format string when storing chunks. Uses '
                         'Python string format specification',
-                        default='{0.dt:%Y/%m/%d}/{0.site}/{0.dt:%H%M%S}/'
-                                '{0.volume_id}-{0.chunk_id:03d}-{0.chunk_type}')
+                        default='{0.site}/{0.volume_id}/{0.dt:%Y%m%d-%H%M%S}-'
+                                '{0.chunk_id:03d}-{0.chunk_type}')
     parser.add_argument('-f', '--format', help='Format for output', type=str,
                         choices=('raw', 'bz2', 'gz'), default='raw')
     parser.add_argument('-g', '--generate_header', help='Generate volume header if missing',
