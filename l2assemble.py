@@ -286,12 +286,24 @@ class S3File(DiskFile):
                 return False
         return True
 
-    def close(self):
-        import hashlib
-        data = self._fobj.getvalue()
+    @staticmethod
+    def put_checked(bucket, key, data):
+        try:
+            import botocore
+            import hashlib
 
-        # Calculate MD5 checksum for integrity
-        digest = hashlib.md5(data).digest().encode('base64').rstrip()
+            # Calculate MD5 checksum for integrity
+            digest = hashlib.md5(data).digest().encode('base64').rstrip()
+
+            # Write to S3
+            logger.debug('Uploading to S3 under key: %s (md5: %s)', key, digest)
+            resp = bucket.put_object(Key=key, Body=data, ContentMD5=digest)
+            logger.debug('S3 PUT Response: %s', str(resp))
+        except botocore.exceptions.ClientError as e:
+            logger.error(str(e))
+
+    def close(self):
+        data = self._fobj.getvalue()
 
         # Get the object and try to make sure it doesn't exist
         obj = self._bucket.Object(self._key)
@@ -299,9 +311,7 @@ class S3File(DiskFile):
             obj = self._bucket.Object(self.fallback(self._key, self._fallback_num))
 
         # Upload to S3
-        logger.debug('Uploading to S3 under key: %s (md5: %s)', obj.key, digest)
-        resp = obj.put(Body=data, ContentMD5=digest.rstrip())
-        logger.debug('PUT Response: %s', str(resp))
+        self.put_checked(self._bucket, obj.key, data)
         super(S3File, self).close()
 
 
@@ -328,6 +338,12 @@ def setup_arg_parser():
                         default='/data/ldm/pub/native/radar/level2')
     parser.add_argument('-s', '--s3', help='Write to specified S3 bucket rather than disk.',
                         type=str)
+    parser.add_argument('-c', '--save-chunks', help='Write chunks to this S3 bucket.',
+                        type=str)
+    parser.add_argument('-k', '--key', help='Key format string when storing chunks. Uses '
+                        'Python string format specification',
+                        default='{0.dt:%Y/%m/%d}/{0.site}/{0.dt:%H%M%S}/'
+                                '{0.volume_id}-{0.chunk_id:03d}-{0.chunk_type}')
     parser.add_argument('-f', '--format', help='Format for output', type=str,
                         choices=('raw', 'bz2', 'gz'), default='raw')
     parser.add_argument('-g', '--generate_header', help='Generate volume header if missing',
@@ -373,6 +389,12 @@ if __name__ == '__main__':
     # Remove any old cache directories
     clear_old_caches(args.data_dir, args.site, args.volume_number)
 
+    # If we need to save the chunks, grab the bucket
+    if args.save_chunks:
+        import boto3
+        s3 = boto3.resource('s3')
+        save_bucket = s3.Bucket(args.save_chunks)
+
     need_more = True
     prod_info = None
 
@@ -382,7 +404,7 @@ if __name__ == '__main__':
     poll_in.register(read_in, select.POLLIN | select.POLLHUP)
 
     while need_more:
-        # Time out after 5 minutes
+        # Time out after given time
         info = poll_in.poll(args.timeout * 1000)
 
         # Kick out if we time out
@@ -407,6 +429,10 @@ if __name__ == '__main__':
             logger.warn('Finishing due to EOF. Saving to: %s', cache)
             chunks.savetodir(cache)
             break
+
+        # Store chunk if necessary
+        if args.save_chunks:
+            S3File.put_checked(save_bucket, args.key.format(prod_info), data)
 
         # Add the chunk, let it control whether we continue
         need_more = chunks.add(prod_info.chunk_id, prod_info.chunk_type, data)
