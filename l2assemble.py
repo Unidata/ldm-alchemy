@@ -333,7 +333,7 @@ def setup_arg_parser():
     parser.add_argument('-g', '--generate_header', help='Generate volume header if missing',
                         action='store_true')
     parser.add_argument('-t', '--timeout', help='Timeout in seconds for waiting for data',
-                        default=300, type=int)
+                        default=600, type=int)
     parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
                                                 'multiple times.', action='count', default=0)
     parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
