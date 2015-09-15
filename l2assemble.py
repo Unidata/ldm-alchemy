@@ -299,7 +299,7 @@ class S3File(DiskFile):
             obj = self._bucket.Object(self.fallback(self._key, self._fallback_num))
 
         # Upload to S3
-        logger.info('Uploading to S3 under key: %s (md5: %s)', obj.key, digest)
+        logger.debug('Uploading to S3 under key: %s (md5: %s)', obj.key, digest)
         resp = obj.put(Body=data, ContentMD5=digest.rstrip())
         logger.debug('PUT Response: %s', str(resp))
         super(S3File, self).close()
