@@ -17,13 +17,6 @@ from contextlib import closing
 from datetime import datetime
 
 
-# Fix some name problems
-try:
-    FileNotFoundError
-except NameError:
-    FileNotFoundError = Exception
-
-
 # Set up logging
 def init_logger(site, volnum):
     # Set the global logger
@@ -64,7 +57,7 @@ def check_read(fobj, num_bytes):
 len_struct = struct.Struct('I')
 def read_byte_string(fobj):
     slen, = len_struct.unpack(check_read(fobj, len_struct.size))
-    return check_read(fobj, slen)
+    return check_read(fobj, slen).decode('ascii')
 
 
 # Stuff for parsing LDM metadata
@@ -85,8 +78,7 @@ ProdInfo = namedtuple('ProdInfo',
                       'format site dt volume_id chunk_id chunk_type version unused')
 def parse_prod_info(s):
     pi = ProdInfo(*s.split('/'))
-    return pi._replace(dt=datetime.strptime(pi.dt, '%Y%m%d%H%M%S'),
-                       chunk_id=int(pi.chunk_id))
+    return pi._replace(dt=datetime.strptime(pi.dt, '%Y%m%d%H%M%S'), chunk_id=int(pi.chunk_id))
 
 
 def cache_dir(base_dir, site, vol_num):
@@ -119,7 +111,7 @@ class ChunkStore(object):
     def __init__(self):
         self._store = dict()
         self.first = self.last = -1
-        self.vol_hdr = None
+        self.vol_hdr = b''
 
     @classmethod
     def loadfromdir(cls, path):
