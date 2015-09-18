@@ -69,7 +69,8 @@ def read_metadata(fobj):
     logger.debug('LDM metadata: %s', meta)
     prod_ident = read_byte_string(fobj)
     logger.debug('Got prod_id: %s', prod_ident)
-    read_byte_string(fobj)  # prod_origin
+    prod_origin = read_byte_string(fobj)
+    logger.debug('Got origin: %s', prod_origin)
     return prod_ident, meta.prod_len
 
 
@@ -329,7 +330,7 @@ def read_chunk(stream):
     logger.debug('Handling chunk {0.chunk_id} ({0.chunk_type}) for {0.site} '
                  '{0.volume_id} {0.dt}'.format(prod_info))
     data = check_read(stream, prod_length)
-    logger.debug('Read chunk.')
+    logger.debug('Read chunk. (%d bytes)', len(data))
     return prod_info, data
 
 
