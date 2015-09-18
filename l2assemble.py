@@ -53,17 +53,23 @@ def check_read(fobj, num_bytes):
         return data
     raise EOFError('Got 0 byte read.')
 
-
+#
+# LDM processing stuff
+#
 len_struct = struct.Struct('I')
+meta_struct = struct.Struct('6IQiII')
+ldm_meta = namedtuple('LDMMeta', 'meta_length md5_1 md5_2 md5_3 md5_4 prod_len creation_secs '
+                                 'creation_micro feed_type seq_num')
+ProdInfo = namedtuple('ProdInfo',
+                      'format site dt volume_id chunk_id chunk_type version unused')
+
+
 def read_byte_string(fobj):
     slen, = len_struct.unpack(check_read(fobj, len_struct.size))
     return check_read(fobj, slen).decode('ascii')
 
 
 # Stuff for parsing LDM metadata
-meta_struct = struct.Struct('6IQiII')
-ldm_meta = namedtuple('LDMMeta', 'meta_length md5_1 md5_2 md5_3 md5_4 prod_len creation_secs '
-                                 'creation_micro feed_type seq_num')
 def read_metadata(fobj):
     meta = ldm_meta(*meta_struct.unpack(check_read(fobj, meta_struct.size)))
     logger.debug('LDM metadata: %s', meta)
@@ -75,13 +81,14 @@ def read_metadata(fobj):
 
 
 # Turn the string 'L2-BZIP2/KFTG/20150908215946/494/43/I/V06/0' into useful information
-ProdInfo = namedtuple('ProdInfo',
-                      'format site dt volume_id chunk_id chunk_type version unused')
 def parse_prod_info(s):
     pi = ProdInfo(*s.split('/'))
     return pi._replace(dt=datetime.strptime(pi.dt, '%Y%m%d%H%M%S'), chunk_id=int(pi.chunk_id))
 
 
+#
+# Caching and storage of chunks
+#
 def cache_dir(base_dir, site, vol_num):
     return os.path.join(base_dir, '.' + site, '.%03d' % vol_num)
 
@@ -107,7 +114,10 @@ def clear_old_caches(base_dir, site, cur_vol):
                 shutil.rmtree(fname, onerror=log_rmtree_error)
 
 
+# Structure of volume header
 hdr_struct = struct.Struct('>12s2L4s')
+
+
 class ChunkStore(object):
     def __init__(self):
         self._store = dict()
@@ -207,6 +217,9 @@ class ChunkStore(object):
         return map(str, set(range(1, self.last + 1)) - set(self._store.keys()))
 
 
+#
+# Handling of writing chunks to a variety of destinations in a bunch of formats
+#
 class ChunkWriter(object):
     def __init__(self, fobj, fmt):
         self.fobj = fobj
@@ -322,6 +335,9 @@ def write_file(writer, chunks):
             logger.error('Error writing chunk: %d', num)
 
 
+#
+# Handling of input
+#
 def read_chunk(stream):
     # Read metadata from LDM for prod id and product size, then read in the appropriate
     # amount of data.
