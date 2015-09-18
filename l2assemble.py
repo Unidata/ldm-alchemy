@@ -21,7 +21,7 @@ from datetime import datetime
 try:
     FileNotFoundError
 except NameError:
-    FileNotFoundError = object
+    FileNotFoundError = Exception
 
 
 # Set up logging
@@ -297,8 +297,7 @@ class S3File(DiskFile):
 
             # Write to S3
             logger.debug('Uploading to S3 under key: %s (md5: %s)', key, digest)
-            resp = bucket.put_object(Key=key, Body=data, ContentMD5=digest)
-            logger.debug('S3 PUT Response: %s', str(resp))
+            bucket.put_object(Key=key, Body=data, ContentMD5=digest)
         except botocore.exceptions.ClientError as e:
             logger.error(str(e))
 
@@ -328,6 +327,30 @@ def write_file(writer, chunks):
             writer.write_chunk(chunk)
         except (OSError, IOError):
             logger.error('Error writing chunk: %d', num)
+
+
+def read_chunk(stream):
+    # Read metadata from LDM for prod id and product size, then read in the appropriate
+    # amount of data.
+    prod_id, prod_length = read_metadata(stream)
+    prod_info = parse_prod_info(prod_id)
+    logger.debug('Handling chunk {0.chunk_id} ({0.chunk_type}) for {0.site} '
+                 '{0.volume_id} {0.dt}'.format(prod_info))
+    data = check_read(stream, prod_length)
+    logger.debug('Read chunk.')
+    return prod_info, data
+
+
+def timed_poll(poll, time_sec):
+    # Time out after given time
+    info = poll.poll(time_sec * 1000)
+
+    # Return whether data are ready
+    if not info:
+        logger.warn('Finishing due to time out.')
+        return False
+
+    return True
 
 
 def setup_arg_parser():
@@ -375,6 +398,17 @@ if __name__ == '__main__':
     total_level = min(2, max(-2, args.quiet - args.verbose))
     logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
 
+    # Reading from standard in. Need to re-open for binary access
+    read_in = os.fdopen(sys.stdin.fileno(), 'rb')
+
+    # Need to go ahead and read the chunk first to clear the pipe
+    prod_info, deferred_chunk = read_chunk(read_in)
+    logger.debug('Chunk on startup: %d', prod_info.chunk_id)
+
+    # Set up a poll so we can timeout waiting for data
+    poll_in = select.poll()
+    poll_in.register(read_in, select.POLLIN | select.POLLHUP)
+
     # Check to see if we have previously written part to disk:
     cache = cache_dir(args.data_dir, args.site, args.volume_number)
     if os.path.exists(cache):
@@ -395,40 +429,26 @@ if __name__ == '__main__':
         s3 = boto3.resource('s3')
         save_bucket = s3.Bucket(args.save_chunks)
 
+    # Main loop
     need_more = True
-    prod_info = None
-
-    # Reading from standard in. Set up a poll so we can timeout waiting for data
-    read_in = os.fdopen(sys.stdin.fileno(), 'rb')
-    poll_in = select.poll()
-    poll_in.register(read_in, select.POLLIN | select.POLLHUP)
-
+    need_save = True
     while need_more:
-        # Time out after given time
-        info = poll_in.poll(args.timeout * 1000)
-
-        # Kick out if we time out
-        if not info:
-            logger.warn('Finishing due to time out.')
-            need_more = False
-            break
-
-        # Read metadata from LDM for prod id and product size, then read in the appropriate
-        # amount of data.
-        logger.debug('Reading....')
-        try:
-            prod_id, prod_length = read_metadata(read_in)
-            prod_info = parse_prod_info(prod_id)
-            logger.debug('Handling chunk {0.chunk_id} ({0.chunk_type}) for {0.site} '
-                         '{0.volume_id} {0.dt}'.format(prod_info))
-            data = check_read(read_in, prod_length)
-            logger.debug('Read chunk.')
-        except EOFError:
-            # If we get an EOF, save our chunks to disk for reloading later
-            cache = cache_dir(args.data_dir, args.site, args.volume_number)
-            logger.warn('Finishing due to EOF. Saving to: %s', cache)
-            chunks.savetodir(cache)
-            break
+        # If we already have a chunk, use it, otherwise try to get another
+        if deferred_chunk:
+            data, deferred_chunk = deferred_chunk, None
+        else:
+            try:
+                if not timed_poll(poll_in, args.timeout):
+                    break
+                logger.debug('Reading....')
+                prod_info, data = read_chunk(read_in)
+            except EOFError:
+                # If we get an EOF, save our chunks to disk for reloading later
+                cache = cache_dir(args.data_dir, args.site, args.volume_number)
+                logger.warn('Finishing due to EOF. Saving to: %s', cache)
+                chunks.savetodir(cache)
+                need_save = False
+                break
 
         # Store chunk if necessary
         if args.save_chunks:
@@ -439,7 +459,7 @@ if __name__ == '__main__':
 
     # When we kick out without needing more, write the data if we have some
     if chunks and prod_info:
-        if not need_more:
+        if need_save:
             # Determine file name
             fname = args.filename.format(prod_info)
             if args.format != 'raw':
