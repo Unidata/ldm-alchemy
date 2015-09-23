@@ -416,7 +416,6 @@ class S3File(DiskFile):
             # Write to S3
             logger.debug('Uploading to S3 under key: %s (md5: %s)', key, digest)
             bucket.put_object(Key=key, Body=data, ContentMD5=digest)
-            return True
         except botocore.exceptions.ClientError as e:
             logger.error(str(e))
             raise IOError from e
@@ -437,17 +436,29 @@ class S3File(DiskFile):
 #
 # Coroutines for handling S3 and saving volumes
 #
-async def save_volume(loop, queue, File, base, fmt):
-    def when_done(fut, loop, queue, fname, chunks):
-        try:
-            fut.result()
-            logger.info('%s done.', fname)
-        except IOError:
-            logger.warn('Failed to save volume %s. Saving for retry...', fname)
-            loop.call_later(15, queue.put_nowait, chunks)
-        finally:
-            queue.task_done()
+def when_item_done(fut, loop, queue, name, item):
+    try:
+        fut.result()
+        logger.info('Finished %s.', name)
+    except IOError:
+        logger.warn('Failed to process %s. Queuing for retry...', name)
+        loop.call_later(15, queue.put_nowait, item)
+    finally:
+        queue.task_done()
 
+
+async def write_chunks_s3(loop, queue, bucket_name):
+    import boto3
+    s3 = boto3.resource('s3')
+    bucket = s3.Bucket(bucket_name)
+    while True:
+        chunk = await queue.get()
+        key = args.key.format(chunk.prod_info)
+        fut = loop.run_in_executor(S3File.put_checked, bucket, key, chunk.data)
+        fut.add_done_callback(functools.partial(when_item_done, loop, queue, key, chunk))
+
+
+async def save_volume(loop, queue, File, base, fmt):
     while True:
         chunks = await queue.get()
 
@@ -464,27 +475,13 @@ async def save_volume(loop, queue, File, base, fmt):
         # Set up and write file in another thread
         file = File(base, path, fname, chunks.min_id())
         fut = loop.run_in_executor(None, write_file, file, fmt, chunks)
-        fut.add_done_callback(functools.partial(when_done, loop=loop, queue=queue, fname=fname,
-                                                chunks=chunks))
+        fut.add_done_callback(functools.partial(when_item_done, loop, queue, fname, chunks))
 
 
 def write_file(file, fmt, chunks):
     cw = ChunkWriter(file, fmt)
     cw.write_chunks(chunks)
     file.close()
-
-
-async def write_chunks_s3(loop, queue, bucket_name):
-    import boto3
-    s3 = boto3.resource('s3')
-    bucket = s3.Bucket(bucket_name)
-    while True:
-        chunk = await queue.get()
-        if not S3File.put_checked(bucket, args.key.format(chunk.prod_info), chunk.data):
-            logger.warn('Failed to PUT chunk %d in %s. Saving for retry...',
-                        chunk.prod_info.chunk_id, bucket_name)
-            loop.call_later(15, queue.put_nowait, chunk)
-        queue.task_done()
 
 
 #
