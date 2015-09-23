@@ -1,45 +1,38 @@
 #!/usr/bin/env python
-import bz2
+import functools
 import glob
-import gzip
-import logging
-import logging.handlers
 import os
 import os.path
 import shutil
-import socket
 import struct
 import sys
-import traceback
 
-from collections import namedtuple
-from contextlib import closing
+from collections import namedtuple, defaultdict
 from datetime import datetime
 
 
 # Set up logging
-def init_logger(site, volnum):
+def init_logger():
+    import logging
+    import logging.handlers
+    import socket
+
     # Set the global logger
     global logger
     logger = logging.getLogger('Level2Handler')
-    logger.setLevel(logging.DEBUG)
 
     # Send logs to LDM's log if possible, otherwise send to stderr.
     try:
         handler = logging.handlers.SysLogHandler(address='/dev/log', facility='local0')
     except (FileNotFoundError, socket.error):
         handler = logging.StreamHandler()
+    async_log = logging.getLogger('asyncio')
+    async_log.setLevel(level=logging.DEBUG)
+    async_log.addHandler(handler)
 
-    fmt = '%(filename)s [%(process)d]: ' + '[%s %03d]' % (site, volnum) + ' %(message)s'
+    fmt = '%(filename)s [%(process)d]: %(message)s'
     handler.setFormatter(logging.Formatter(fmt=fmt))
     logger.addHandler(handler)
-
-    # Set up a system exception hook for logging exceptions
-    def log_uncaught_exceptions(ex_cls, ex, tb):
-        global logger
-        logger.critical(''.join(traceback.format_tb(tb)))
-        logger.critical('{0}: {1}'.format(ex_cls, ex))
-    sys.excepthook = log_uncaught_exceptions
 
 
 def log_rmtree_error(func, path, exc):
@@ -47,8 +40,8 @@ def log_rmtree_error(func, path, exc):
 
 
 # Raises an EOFError if we get a 0 byte read, which is by definition an EOF in Python
-def check_read(fobj, num_bytes):
-    data = fobj.read(num_bytes)
+async def check_read(fobj, num_bytes):
+    data = await fobj.read(num_bytes)
     if data:
         return data
     raise EOFError('Got 0 byte read.')
@@ -56,114 +49,189 @@ def check_read(fobj, num_bytes):
 #
 # LDM processing stuff
 #
+hdr_struct = struct.Struct('>12s2L4s')  # Structure of volume header
 len_struct = struct.Struct('I')
 meta_struct = struct.Struct('6IQiII')
 ldm_meta = namedtuple('LDMMeta', 'meta_length md5_1 md5_2 md5_3 md5_4 prod_len creation_secs '
                                  'creation_micro feed_type seq_num')
-ProdInfo = namedtuple('ProdInfo',
-                      'format site dt volume_id chunk_id chunk_type version unused')
+_ProdInfo = namedtuple('ProdInfo',
+                       'format site dt volume_id chunk_id chunk_type version unused')
 
 
-def read_byte_string(fobj):
-    slen, = len_struct.unpack(check_read(fobj, len_struct.size))
-    return check_read(fobj, slen).decode('ascii')
+class ProdInfo(_ProdInfo):
+    def __str__(self):
+        mod = self._replace(dt=self.dt.strftime('%Y%m%d%H%M%S'), chunk_id=str(self.chunk_id),
+                            volume_id=str(self.volume_id))
+        return '_'.join(mod)
+
+    @classmethod
+    def fromstring(cls, s):
+        c = cls(*s.split('_'))
+        return c._replace(dt=datetime.strptime(c.dt, '%Y%m%d%H%M%S'), chunk_id=int(c.chunk_id),
+                          volume_id=int(c.volume_id))
+
+    # Turn the string 'L2-BZIP2/KFTG/20150908215946/494/43/I/V06/0' into useful information
+    @classmethod
+    def from_ldm_string(cls, s):
+        return cls.fromstring(s.replace('/', '_'))
+
+    def as_vol_hdr(self):
+        version = b'AR2V00' + self.version[1:] + b'.' + self.volume_id
+        timestamp = (self.dt - datetime(1970, 1, 1)).total_seconds()
+        date = int(timestamp // 86400)
+        time = int(timestamp - date * 86400)
+        return hdr_struct.pack(version, date + 1, time * 1000, self.site)
+
+
+async def read_byte_string(fobj):
+    data = await check_read(fobj, len_struct.size)
+    slen, = len_struct.unpack(data)
+    s = await check_read(fobj, slen)
+    return s.decode('ascii')
 
 
 # Stuff for parsing LDM metadata
-def read_metadata(fobj):
-    meta = ldm_meta(*meta_struct.unpack(check_read(fobj, meta_struct.size)))
+async def read_metadata(fobj):
+    data = await check_read(fobj, meta_struct.size)
+    meta = ldm_meta(*meta_struct.unpack(data))
     logger.debug('LDM metadata: %s', meta)
-    prod_ident = read_byte_string(fobj)
+    prod_ident = await read_byte_string(fobj)
     logger.debug('Got prod_id: %s', prod_ident)
-    prod_origin = read_byte_string(fobj)
+    prod_origin = await read_byte_string(fobj)
     logger.debug('Got origin: %s', prod_origin)
     return prod_ident, meta.prod_len
-
-
-# Turn the string 'L2-BZIP2/KFTG/20150908215946/494/43/I/V06/0' into useful information
-def parse_prod_info(s):
-    pi = ProdInfo(*s.split('/'))
-    return pi._replace(dt=datetime.strptime(pi.dt, '%Y%m%d%H%M%S'), chunk_id=int(pi.chunk_id))
 
 
 #
 # Caching and storage of chunks
 #
-def cache_dir(base_dir, site, vol_num):
-    return os.path.join(base_dir, '.' + site, '.%03d' % vol_num)
+# Overriding defaultdict--essentially just to pass key to factory
+class VolumeStore(defaultdict):
+    def __init__(self, cache_dir, gen_header):
+        super(defaultdict, self).__init__()
+        self._cache_dir = cache_dir
+        self._gen_header = gen_header
 
+    def __missing__(self, key):
+        new = self._create_store(key)
+        self[key] = new
+        return new
 
-def clear_old_caches(base_dir, site, cur_vol):
-    logger.debug('Checking for old caches...')
-    # List all old cache directories for this site
-    for fname in glob.glob(os.path.join(base_dir, '.' + site, '.[0-9][0-9][0-9]')):
-        if os.path.isdir(fname):  # Minor sanity check that this is ours
-            logger.debug('Found: %s', fname)
+    def _create_store(self, key):
+        logger.debug('Creating store for: %s', key)
 
-            # Use this volume number as a proxy for time
-            num = int(os.path.basename(fname)[1:])
+        # Check to see if we have previously written part to disk:
+        cache = self.cache_dir(key)
+        if os.path.exists(cache):
+            logger.debug('Loading previously stored chunks from: %s', cache)
+            store = ChunkStore.loadfromdir(cache)
+            shutil.rmtree(cache, onerror=log_rmtree_error)
+        else:
+            store = ChunkStore()
 
-            # Find the difference, account for the wrap 999->0
-            diff = cur_vol - num
-            if diff < 0:
-                diff += 1000
+        # Pass in call-back to call when done. We don't use the standard future callback
+        # because it will end up queued--we need to run immediately.
+        store.task = asyncio.ensure_future(
+            store.wait_for_chunks(self.timeout,
+                                  functools.partial(self.chunk_store_done, key=key)))
+        store.ensure_header(self._gen_header)
 
-            # If the one we found is more than 30 past, delete it
-            if diff > 30:
-                logger.info('Deleting old cache: %s', fname)
-                shutil.rmtree(fname, onerror=log_rmtree_error)
+        # Remove any old cache directories
+        self.clear_old_caches(key)
 
+        return store
 
-# Structure of volume header
-hdr_struct = struct.Struct('>12s2L4s')
+    def cache_dir(self, key):
+        site, vol_num = key
+        return os.path.join(self._cache_dir, '.' + site, '%03d' % vol_num)
+
+    def clear_old_caches(self, key):
+        logger.debug('Checking for old caches...')
+        # List all old cache directories for this site
+        site, cur_vol = key
+        for fname in glob.glob(os.path.join(self._cache_dir, '.' + site, '[0-9][0-9][0-9]')):
+            if os.path.isdir(fname):  # Minor sanity check that this is ours
+                logger.debug('Found: %s', fname)
+
+                # Use this volume number as a proxy for time
+                num = int(os.path.basename(fname))
+
+                # Find the difference, account for the wrap 999->0
+                diff = cur_vol - num
+                if diff < 0:
+                    diff += 1000
+
+                # If the one we found is more than 30 past, delete it
+                if diff > 30:
+                    logger.info('Deleting old cache: %s', fname)
+                    shutil.rmtree(fname, onerror=log_rmtree_error)
+
+    def save(self):
+        for key, chunks in self.items():
+            cache = self.cache_dir(key)
+            logger.warn('Caching chunks to: %s', cache)
+            chunks.savetodir(cache)
+
+    async def finish(self):
+        # Need to iterate over copy of keys because items could be removed during iteration
+        for key in list(self.keys()):
+            logger.debug('Flushing chunk store queue for %s', key)
+            store = self[key]
+            await store.finish()
+            store.task.cancel()
+        logger.debug('Flushing volumes queue')
+        await self.vol_dest.join()
+
+    async def wait_for_chunks(self, src, vol_dest, timeout):
+        self.vol_dest = vol_dest
+        self.timeout = timeout
+        while True:
+            # Get the next chunk when available
+            chunk = await src.get()
+
+            # Find the appropriate store (will be created if necessary)
+            vol_num = chunk.prod_info.volume_id
+            site = chunk.prod_info.site
+            await self[site, vol_num].enqueue(chunk)
+            src.task_done()
+
+    def chunk_store_done(self, key):
+        logger.debug('Chunk store %s finished', key)
+        store = self.pop(key)
+        self.vol_dest.put_nowait(store)
 
 
 class ChunkStore(object):
     def __init__(self):
         self._store = dict()
         self.first = self.last = -1
-        self.vol_hdr = b''
+        self._vol_hdr = b''
+        self._add_header = False
+        self._queue = asyncio.Queue()
 
     @classmethod
     def loadfromdir(cls, path):
         # Go find all the appropriately named files in the directory and load them
         cs = ChunkStore()
-        for fname in sorted(glob.glob(os.path.join(path, '[0-9][0-9][0-9][EIS]'))):
+        for fname in sorted(glob.glob(os.path.join(path, 'L2-BZIP2_*'))):
             name = os.path.basename(fname)
-            chunk_id = int(name[:3])
-            chunk_type = name[-1]
-            cs.add(chunk_id, chunk_type, open(fname, 'rb').read())
+            cs.add(Chunk(prod_info=ProdInfo.fromstring(name), data=open(fname, 'rb').read()))
         logger.warn('Loaded %d chunks from cache %s', len(cs), path)
         return cs
 
     def savetodir(self, path):
-        # Get all the chunks
-        chunk_ids = list(self._store.keys())
-
         # Create the directory if necessary
         if not os.path.exists(path):
             os.makedirs(path)
 
-        # Handle first and last separately
-        if self.first != -1:
-            logger.warn('Saving first chunk: %d', self.first)
-            chunk_ids.remove(self.first)
-            with open(os.path.join(path, '%03dS' % self.first), 'wb') as outf:
-                outf.write(self.vol_hdr)
-                outf.write(self._store[self.first])
-
-        if self.last != -1:
-            logger.warn('Saving last chunk: %d', self.last)
-            chunk_ids.remove(self.last)
-            with open(os.path.join(path, '%03dE' % self.last), 'wb') as outf:
-                outf.write(self._store[self.last])
-
-        # Write the rest
-        logger.warn('Saving remaining %d (of %d) chunks: [%s]', len(chunk_ids),
-                    len(self._store), ' '.join(map(str, chunk_ids)))
-        for chunk_id in chunk_ids:
-            with open(os.path.join(path, '%03dI' % chunk_id), 'wb') as outf:
-                outf.write(self._store[chunk_id])
+        # Write the chunks
+        logger.warn('Saving %d chunks: [%s]', len(self), ' '.join(map(str,
+                                                                      self._store.keys())))
+        for chunk in self:
+            with open(os.path.join(path, str(chunk.prod_info)), 'wb') as outf:
+                if chunk.prod_info.chunk_id == self.first:
+                    outf.write(self.vol_hdr)
+                outf.write(chunk.data)
 
     def __len__(self):
         return len(self._store)
@@ -178,39 +246,66 @@ class ChunkStore(object):
     def __iter__(self):
         return iter(i[1] for i in sorted(self._store.items()))
 
+    async def finish(self):
+        await self._queue.join()
+
+    async def enqueue(self, chunk):
+        await self._queue.put(chunk)
+
+    async def wait_for_chunks(self, timeout, when_done):
+        need_more = True
+        while need_more:
+            try:
+                fut = asyncio.wait_for(self._queue.get(), timeout)
+                chunk = await fut
+                need_more = self.add(chunk)
+                self._queue.task_done()
+            except asyncio.TimeoutError:
+                logger.warn('Finishing due to timeout.')
+                need_more = False
+
+        when_done()
+
     # Add a chunk to our store. If this was the start or end, note that as well.
-    def add(self, chunk_id, chunk_type, chunk):
+    def add(self, chunk):
         max_id = self.max_id()
+        chunk_id = chunk.prod_info.chunk_id
         if chunk_id != max_id + 1:
             if chunk_id in self._store:
                 logger.warn('Duplicate chunk: %d', chunk_id)
             else:
                 logger.warn('Chunks out of order--Got: %d Max: %d', chunk_id, max_id)
+        logger.debug('Added chunk: %d', chunk_id)
 
-        # Not only do we need to note the first block, we need to pop off the header
-        # bytes
+        # Not only do we need to note the first block, we need to pop off the header bytes
+        chunk_type = chunk.prod_info.chunk_type
         if chunk_type == 'S':
             self.first = chunk_id
-            self.vol_hdr = chunk[:hdr_struct.size]
-            chunk = chunk[hdr_struct.size:]
+            self.vol_hdr = chunk.data[:hdr_struct.size]
+            chunk = chunk._replace(data=chunk.data[hdr_struct.size:])
         elif chunk_type == 'E':
             self.last = chunk_id
 
         self._store[chunk_id] = chunk
 
-        # Return whether we need more chunks
+        # Return whether we need more
         return len(self) != self.last
 
+    def ensure_header(self, f):
+        self._add_header = f
+
     # Reconstruct a level 2 volume header if we miss the first block
-    def add_header(self, info):
-        if not self.vol_hdr:
-            version = b'AR2V00' + info.version[1:] + b'.' + info.volume_id
-            timestamp = (info.dt - datetime(1970, 1, 1)).total_seconds()
-            date = int(timestamp // 86400)
-            time = int(timestamp - date * 86400)
-            logger.warn('Creating volume header for first chunk: %s %d %d %s', version,
-                        date + 1, time * 1000, info.site)
-            self.vol_hdr = hdr_struct.pack(version, date + 1, time * 1000, info.site)
+    @property
+    def vol_hdr(self):
+        if not self._vol_hdr and self._add_header:
+            hdr = list(self._store.values())[0].prod_info.as_vol_hdr()
+            logger.warn('Created volume header for first chunk: %s', self.vol_hdr)
+            return hdr
+        return self._vol_hdr
+
+    @vol_hdr.setter
+    def vol_hdr(self, hdr):
+        self._vol_hdr = hdr
 
     # List any blocks we missed
     def missing(self):
@@ -226,7 +321,9 @@ class ChunkWriter(object):
         if fmt == 'raw':
             self._process_chunk = lambda chunk: chunk
         else:
+            import bz2
             if fmt == 'gz':
+                import gzip
                 self.fobj = gzip.GzipFile(fileobj=fobj, mode='wb')
             elif fmt == 'bz2':
                 self.fobj = bz2.BZ2File(fobj, mode='wb')
@@ -236,7 +333,21 @@ class ChunkWriter(object):
         self.fobj.write(data)
 
     def write_chunk(self, chunk):
-        self.write(self._process_chunk(chunk))
+        self.write(self._process_chunk(chunk.data))
+
+    def write_chunks(self, chunks):
+        # Write the volume header if we have one
+        if chunks.vol_hdr:
+            self.write(chunks.vol_hdr)
+        else:
+            logger.error('Missing volume header for: %s', self.fobj.filename)
+
+        # Write the data chunks
+        for num, chunk in enumerate(chunks):
+            try:
+                self.write_chunk(chunk)
+            except (OSError, IOError):
+                logger.error('Error writing chunk: %d', num)
 
 
 class DiskFile(object):
@@ -252,6 +363,7 @@ class DiskFile(object):
         if os.path.exists(outname):
             outname = self.fallback(outname, fallback_num)
 
+        self.filename = name
         self._fobj = open(outname, 'wb')
 
     @staticmethod
@@ -277,6 +389,7 @@ class S3File(DiskFile):
 
         logger.debug('Writing to S3 bucket: %s', bucket_name)
         s3 = boto3.resource('s3')
+        self.filename = name
         self._bucket = s3.Bucket(bucket_name)
         self._key = path + '/' + name
         self._fobj = BytesIO()
@@ -297,15 +410,18 @@ class S3File(DiskFile):
         try:
             import botocore
             import hashlib
+            import base64
 
             # Calculate MD5 checksum for integrity
-            digest = hashlib.md5(data).digest().encode('base64').rstrip()
+            digest = base64.b64encode(hashlib.md5(data).digest()).decode('ascii')
 
             # Write to S3
             logger.debug('Uploading to S3 under key: %s (md5: %s)', key, digest)
             bucket.put_object(Key=key, Body=data, ContentMD5=digest)
+            return True
         except botocore.exceptions.ClientError as e:
             logger.error(str(e))
+            raise IOError from e
 
     def close(self):
         data = self._fobj.getvalue()
@@ -316,53 +432,102 @@ class S3File(DiskFile):
             obj = self._bucket.Object(self.fallback(self._key, self._fallback_num))
 
         # Upload to S3
-        self.put_checked(self._bucket, obj.key, data)
+        ret = self.put_checked(self._bucket, obj.key, data)
         super(S3File, self).close()
 
 
-def write_file(writer, chunks):
-    # Write the volume header if we have one
-    if chunks.vol_hdr:
-        writer.write(chunks.vol_hdr)
-    else:
-        logger.error('Missing volume header for: %s', fname)
+#
+# Coroutines for handling S3 and saving volumes
+#
+async def save_volume(loop, queue, File, base, format):
+    while True:
+        chunks = await queue.get()
 
-    # Write the data chunks
-    for num, chunk in enumerate(chunks):
+        # Determine file name
+        prod_info = next(iter(chunks)).prod_info
+        fname = args.filename.format(prod_info)
+        if format != 'raw':
+            fname += '.' + format
+
+        path = args.path.format(prod_info)
+        logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
+                    chunks.last, len(chunks), ' '.join(chunks.missing()))
+
+        # Set up and write file
         try:
-            writer.write_chunk(chunk)
-        except (OSError, IOError):
-            logger.error('Error writing chunk: %d', num)
+            file = File(base, path, fname, chunks.min_id())
+            cw = ChunkWriter(file, format)
+            cw.write_chunks(chunks)
+            file.close()
+        except IOError:
+            logger.warn('Failed to save volume %s. Saving for retry...', fname)
+            loop.call_later(15, queue.put_nowait, chunks)
+        finally:
+            queue.task_done()
+
+
+async def write_chunks_s3(loop, queue, bucket_name):
+    import boto3
+    s3 = boto3.resource('s3')
+    bucket = s3.Bucket(bucket_name)
+    while True:
+        chunk = await queue.get()
+        if not S3File.put_checked(bucket, args.key.format(chunk.prod_info), chunk.data):
+            logger.warn('Failed to PUT chunk %d in %s. Saving for retry...',
+                        chunk.prod_info.chunk_id, bucket_name)
+            loop.call_later(15, queue.put_nowait, chunk)
+            queue.task_done()
 
 
 #
 # Handling of input
 #
-def read_chunk(stream):
+Chunk = namedtuple('Chunk', 'prod_info data')
+
+
+async def read_chunk(stream):
     # Read metadata from LDM for prod id and product size, then read in the appropriate
     # amount of data.
-    prod_id, prod_length = read_metadata(stream)
-    prod_info = parse_prod_info(prod_id)
-    logger.debug('Handling chunk {0.chunk_id} ({0.chunk_type}) for {0.site} '
+    prod_id, prod_length = await read_metadata(stream)
+    prod_info = ProdInfo.from_ldm_string(prod_id)
+    logger.debug('Reading chunk {0.chunk_id} ({0.chunk_type}) for {0.site} '
                  '{0.volume_id} {0.dt}'.format(prod_info))
-    data = check_read(stream, prod_length)
+    data = await check_read(stream, prod_length)
     logger.debug('Read chunk. (%d bytes)', len(data))
-    return prod_info, data
+    return Chunk(prod_info, data)
 
 
-def timed_poll(poll, time_sec):
-    # Time out after given time
-    info = poll.poll(time_sec * 1000)
+async def read_stream(loop, file, vols, sinks, tasks):
+    stream_reader = asyncio.StreamReader(loop=loop)
+    transport, _ = await loop.connect_read_pipe(
+        lambda: asyncio.StreamReaderProtocol(stream_reader), file)
+    try:
+        while True:
+            logger.debug('Waiting for chunk...')
+            chunk = await read_chunk(stream_reader)
+            for sink in sinks:
+                await sink.put(chunk)
+    except EOFError:
+        # If we get an EOF, flush out the queues top down, then save remaining
+        # chunks to disk for reloading later.
+        logger.warn('Finishing due to EOF.')
+        for sink in sinks:
+            logger.debug('Flushing chunk queue.')
+            await sink.join()
+        await vols.finish()
+        vols.save()
+        for t in tasks:
+            t.cancel()
+        await asyncio.sleep(0.01) # Just enough to let other things close out
+        transport.close()
 
-    # Return whether data are ready
-    if not info:
-        logger.warn('Finishing due to time out.')
-        return False
 
-    return True
-
-
+#
+# Argument parsing
+#
 def setup_arg_parser():
+    import argparse
+
     # Set up argument parsing
     parser = argparse.ArgumentParser(description='Read NEXRAD Level2 LDM compressed blocks'
                                      ' and assemble when they are done arriving.')
@@ -391,105 +556,46 @@ def setup_arg_parser():
     parser.add_argument('-n', '--filename', help='Filename format string. Uses Python '
                         'string format specification',
                         default='Level2_{0.site}_{0.dt:%Y%m%d_%H%M%S}.ar2v')
-    parser.add_argument('site', help='Site ID for volume', type=str)
-    parser.add_argument('volume_number', help='Volume number for file', type=int)
+    parser.add_argument('other', help='Other arguments for LDM identification', type=str,
+                        nargs='*')
     return parser
 
-if __name__ == '__main__':
-    import argparse
-    import select
 
-    parser = setup_arg_parser()
-    args = parser.parse_args()
-    init_logger(args.site, args.volume_number)
+if __name__ == '__main__':
+    import asyncio
+
+    init_logger()
+    args = setup_arg_parser().parse_args()
 
     # Figure out how noisy we should be. Start by clipping between -2 and 2.
     total_level = min(2, max(-2, args.quiet - args.verbose))
     logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
 
-    # Reading from standard in. Need to re-open for binary access
-    read_in = os.fdopen(sys.stdin.fileno(), 'rb')
+    # Read directly from standard in buffer
+    read_in = sys.stdin
 
-    # Need to go ahead and read the chunk first to clear the pipe
-    prod_info, deferred_chunk = read_chunk(read_in)
-    logger.debug('Chunk on startup: %d', prod_info.chunk_id)
+    # Set up event loop
+    loop = asyncio.get_event_loop()
+    loop.set_debug(True)
 
-    # Set up a poll so we can timeout waiting for data
-    poll_in = select.poll()
-    poll_in.register(read_in, select.POLLIN | select.POLLHUP)
+    # Setup queue for saving volumes
+    vol_queue = asyncio.Queue()
+    FileClass, base = (S3File, args.s3) if args.s3 else (DiskFile, args.data_dir)
+    tasks = [asyncio.ensure_future(save_volume(loop, vol_queue, FileClass, base, args.format))]
 
-    # Check to see if we have previously written part to disk:
-    cache = cache_dir(args.data_dir, args.site, args.volume_number)
-    if os.path.exists(cache):
-        logger.debug('Loading previously stored chunks from: %s', cache)
-        chunks = ChunkStore.loadfromdir(cache)
+    # Set up storing chunks internally
+    chunk_queue = asyncio.Queue()
+    volumes = VolumeStore(cache_dir=args.data_dir, gen_header=args.generate_header)
+    tasks.append(asyncio.ensure_future(volumes.wait_for_chunks(chunk_queue, vol_queue,
+                                                               args.timeout)))
+    queues = [chunk_queue]
 
-        # Clear it out after we've finished
-        shutil.rmtree(cache, onerror=log_rmtree_error)
-    else:
-        chunks = ChunkStore()
-
-    # Remove any old cache directories
-    clear_old_caches(args.data_dir, args.site, args.volume_number)
-
-    # If we need to save the chunks, grab the bucket
+    # If we need to save the chunks to s3, set that up as well
     if args.save_chunks:
-        import boto3
-        s3 = boto3.resource('s3')
-        save_bucket = s3.Bucket(args.save_chunks)
+        s3_queue = asyncio.Queue()
+        tasks.append(asyncio.ensure_future(write_chunks_s3(loop, s3_queue, args.save_chunks)))
+        queues.append(s3_queue)
 
-    # Main loop
-    need_more = True
-    need_save = True
-    while need_more:
-        # If we already have a chunk, use it, otherwise try to get another
-        if deferred_chunk:
-            data, deferred_chunk = deferred_chunk, None
-        else:
-            try:
-                if not timed_poll(poll_in, args.timeout):
-                    break
-                logger.debug('Reading....')
-                prod_info, data = read_chunk(read_in)
-            except EOFError:
-                # If we get an EOF, save our chunks to disk for reloading later
-                cache = cache_dir(args.data_dir, args.site, args.volume_number)
-                logger.warn('Finishing due to EOF. Saving to: %s', cache)
-                chunks.savetodir(cache)
-                need_save = False
-                break
-
-        # Store chunk if necessary
-        if args.save_chunks:
-            S3File.put_checked(save_bucket, args.key.format(prod_info), data)
-
-        # Add the chunk, let it control whether we continue
-        need_more = chunks.add(prod_info.chunk_id, prod_info.chunk_type, data)
-
-    # When we kick out without needing more, write the data if we have some
-    if chunks and prod_info:
-        if need_save:
-            # Determine file name
-            fname = args.filename.format(prod_info)
-            if args.format != 'raw':
-                fname += '.' + args.format
-
-            path = args.path.format(prod_info)
-            logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
-                        chunks.last, len(chunks), ' '.join(chunks.missing()))
-
-            # Add header if necessary
-            if args.generate_header:
-                chunks.add_header(prod_info)
-
-            # Set up end place file will be written to
-            if args.s3:
-                file = S3File(args.s3, path, fname, chunks.min_id())
-            else:
-                file = DiskFile(args.data_dir, path, fname, chunks.min_id())
-
-            with closing(file):
-                cw = ChunkWriter(file, args.format)
-                write_file(cw, chunks)
-    else:
-        logger.error('Exiting without doing anything!')
+    # Add callback for stdin and start loop
+    loop.run_until_complete(read_stream(loop, read_in, volumes, queues, tasks))
+    loop.close()
