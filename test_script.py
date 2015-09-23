@@ -27,18 +27,40 @@ def write_chunk(out, radar, vol, chunk, typ):
     write_str(out, prod_id)
     write_str(out, origin)
     out.write(block)
+    out.flush()
 
 
 if __name__ == '__main__':
     import subprocess
     import sys
+    import time
+
+    timeout = False
+    sig_hup = False
+    if len(sys.argv) > 1:
+        if sys.argv[1] == 'timeout':
+            timeout = True
+        elif sys.argv[1] == 'hup':
+            sig_hup = True
+
     radar = 'KFTG'
     vol = 494
-    proc = subprocess.Popen(['./l2assemble.py', '-vv', '-d', '.', '-t', '2', radar, str(vol)],
-                            stdout=sys.stdout, stdin=subprocess.PIPE, universal_newlines=False)
+    time_val = 10
+    proc = subprocess.Popen(['./l2assemble.py', '-vv', '-d', '.', '-t', str(time_val), radar],
+                            stdout=sys.stdout, stdin=subprocess.PIPE, universal_newlines=False,
+                            bufsize=40)
 
     write_chunk(proc.stdin, radar, vol, 1, 'S')
-    for chunk in range(2, 10):
+    for chunk in range(2, 3):
         write_chunk(proc.stdin, radar, vol, chunk, 'I')
+        time.sleep(0.25)
     else:
-        write_chunk(proc.stdin, radar, vol, chunk + 1, 'E')
+        if not (timeout or sig_hup):
+            write_chunk(proc.stdin, radar, vol, chunk + 1, 'E')
+
+    proc.stdin.flush()
+    if timeout:
+        time.sleep(timeout + 15)
+
+    proc.stdin.close()
+    proc.wait()
