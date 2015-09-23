@@ -1,3 +1,5 @@
 .idea/
 KFTG/
 full_feed
+*.ipynb
+data/

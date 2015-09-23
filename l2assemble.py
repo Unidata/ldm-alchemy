@@ -26,11 +26,8 @@ def init_logger():
         handler = logging.handlers.SysLogHandler(address='/dev/log', facility='local0')
     except (FileNotFoundError, socket.error):
         handler = logging.StreamHandler()
-    async_log = logging.getLogger('asyncio')
-    async_log.setLevel(level=logging.DEBUG)
-    async_log.addHandler(handler)
 
-    fmt = '%(filename)s [%(process)d]: %(message)s'
+    fmt = '%(filename)s [%(funcName)s]: %(message)s'
     handler.setFormatter(logging.Formatter(fmt=fmt))
     logger.addHandler(handler)
 
@@ -41,7 +38,7 @@ def log_rmtree_error(func, path, exc):
 
 # Raises an EOFError if we get a 0 byte read, which is by definition an EOF in Python
 async def check_read(fobj, num_bytes):
-    data = await fobj.read(num_bytes)
+    data = await fobj.readexactly(num_bytes)
     if data:
         return data
     raise EOFError('Got 0 byte read.')
@@ -199,6 +196,9 @@ class VolumeStore(defaultdict):
         logger.debug('Chunk store %s finished', key)
         store = self.pop(key)
         self.vol_dest.put_nowait(store)
+
+
+Chunk = namedtuple('Chunk', 'prod_info data')
 
 
 class ChunkStore(object):
@@ -372,9 +372,6 @@ class DiskFile(object):
         logger.error('%s already exists!. Falling back to %s.', outname, newname)
         return newname
 
-    def writable(self):
-        return True
-
     def write(self, data):
         return self._fobj.write(data)
 
@@ -395,8 +392,9 @@ class S3File(DiskFile):
         self._fobj = BytesIO()
         self._fallback_num = fallback_num
 
-    def _exists(self, obj):
-        import botocore
+    @staticmethod
+    def _exists(obj):
+        import botocore.exceptions
         try:
             obj.version_id
         except botocore.exceptions.ClientError as e:
@@ -407,10 +405,10 @@ class S3File(DiskFile):
 
     @staticmethod
     def put_checked(bucket, key, data):
+        import botocore.exceptions
+        import hashlib
+        import base64
         try:
-            import botocore
-            import hashlib
-            import base64
 
             # Calculate MD5 checksum for integrity
             digest = base64.b64encode(hashlib.md5(data).digest()).decode('ascii')
@@ -432,38 +430,48 @@ class S3File(DiskFile):
             obj = self._bucket.Object(self.fallback(self._key, self._fallback_num))
 
         # Upload to S3
-        ret = self.put_checked(self._bucket, obj.key, data)
+        self.put_checked(self._bucket, obj.key, data)
         super(S3File, self).close()
 
 
 #
 # Coroutines for handling S3 and saving volumes
 #
-async def save_volume(loop, queue, File, base, format):
+async def save_volume(loop, queue, File, base, fmt):
+    def when_done(fut, loop, queue, fname, chunks):
+        try:
+            fut.result()
+            logger.info('%s done.', fname)
+        except IOError:
+            logger.warn('Failed to save volume %s. Saving for retry...', fname)
+            loop.call_later(15, queue.put_nowait, chunks)
+        finally:
+            queue.task_done()
+
     while True:
         chunks = await queue.get()
 
         # Determine file name
         prod_info = next(iter(chunks)).prod_info
         fname = args.filename.format(prod_info)
-        if format != 'raw':
-            fname += '.' + format
+        if fmt != 'raw':
+            fname += '.' + fmt
 
         path = args.path.format(prod_info)
         logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
                     chunks.last, len(chunks), ' '.join(chunks.missing()))
 
-        # Set up and write file
-        try:
-            file = File(base, path, fname, chunks.min_id())
-            cw = ChunkWriter(file, format)
-            cw.write_chunks(chunks)
-            file.close()
-        except IOError:
-            logger.warn('Failed to save volume %s. Saving for retry...', fname)
-            loop.call_later(15, queue.put_nowait, chunks)
-        finally:
-            queue.task_done()
+        # Set up and write file in another thread
+        file = File(base, path, fname, chunks.min_id())
+        fut = loop.run_in_executor(None, write_file, file, fmt, chunks)
+        fut.add_done_callback(functools.partial(when_done, loop=loop, queue=queue, fname=fname,
+                                                chunks=chunks))
+
+
+def write_file(file, fmt, chunks):
+    cw = ChunkWriter(file, fmt)
+    cw.write_chunks(chunks)
+    file.close()
 
 
 async def write_chunks_s3(loop, queue, bucket_name):
@@ -482,9 +490,6 @@ async def write_chunks_s3(loop, queue, bucket_name):
 #
 # Handling of input
 #
-Chunk = namedtuple('Chunk', 'prod_info data')
-
-
 async def read_chunk(stream):
     # Read metadata from LDM for prod id and product size, then read in the appropriate
     # amount of data.
@@ -492,7 +497,7 @@ async def read_chunk(stream):
     prod_info = ProdInfo.from_ldm_string(prod_id)
     logger.debug('Reading chunk {0.chunk_id} ({0.chunk_type}) for {0.site} '
                  '{0.volume_id} {0.dt}'.format(prod_info))
-    data = await check_read(stream, prod_length)
+    data = await stream.readexactly(prod_length)
     logger.debug('Read chunk. (%d bytes)', len(data))
     return Chunk(prod_info, data)
 
@@ -518,7 +523,7 @@ async def read_stream(loop, file, vols, sinks, tasks):
         vols.save()
         for t in tasks:
             t.cancel()
-        await asyncio.sleep(0.01) # Just enough to let other things close out
+        await asyncio.sleep(0.01)  # Just enough to let other things close out
         transport.close()
 
 
@@ -572,11 +577,10 @@ if __name__ == '__main__':
     logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
 
     # Read directly from standard in buffer
-    read_in = sys.stdin
+    read_in = sys.stdin.buffer
 
     # Set up event loop
     loop = asyncio.get_event_loop()
-    loop.set_debug(True)
 
     # Setup queue for saving volumes
     vol_queue = asyncio.Queue()
