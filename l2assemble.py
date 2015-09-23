@@ -324,7 +324,7 @@ class ChunkWriter(object):
             import bz2
             if fmt == 'gz':
                 import gzip
-                self.fobj = gzip.GzipFile(fileobj=fobj, mode='wb')
+                self.fobj = gzip.GzipFile(filename=self.fobj.filename, fileobj=fobj, mode='wb')
             elif fmt == 'bz2':
                 self.fobj = bz2.BZ2File(fobj, mode='wb')
             self._process_chunk = lambda chunk: bz2.decompress(chunk[4:])
@@ -436,9 +436,9 @@ class S3File(DiskFile):
 #
 # Coroutines for handling S3 and saving volumes
 #
-def when_item_done(fut, loop, queue, name, item):
+def when_item_done(loop, queue, name, item, future):
     try:
-        fut.result()
+        future.result()
         logger.info('Finished %s.', name)
     except IOError:
         logger.warn('Failed to process %s. Queuing for retry...', name)
@@ -447,14 +447,19 @@ def when_item_done(fut, loop, queue, name, item):
         queue.task_done()
 
 
-async def write_chunks_s3(loop, queue, bucket_name):
+def upload_chunk_s3(bucket_name, key, chunk):
     import boto3
     s3 = boto3.resource('s3')
     bucket = s3.Bucket(bucket_name)
+    S3File.put_checked(bucket, key, chunk.data)
+
+
+async def write_chunks_s3(loop, queue, bucket_name):
     while True:
         chunk = await queue.get()
         key = args.key.format(chunk.prod_info)
-        fut = loop.run_in_executor(S3File.put_checked, bucket, key, chunk.data)
+        logger.info('Writing chunk to %s on S3 %s', key, bucket_name)
+        fut = loop.run_in_executor(None, upload_chunk_s3, bucket_name, key, chunk)
         fut.add_done_callback(functools.partial(when_item_done, loop, queue, key, chunk))
 
 
