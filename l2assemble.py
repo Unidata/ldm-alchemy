@@ -484,7 +484,7 @@ async def write_chunks_s3(loop, queue, bucket_name):
             logger.warn('Failed to PUT chunk %d in %s. Saving for retry...',
                         chunk.prod_info.chunk_id, bucket_name)
             loop.call_later(15, queue.put_nowait, chunk)
-            queue.task_done()
+        queue.task_done()
 
 
 #
