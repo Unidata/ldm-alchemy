@@ -1,19 +1,33 @@
 #!/usr/bin/env python
 import functools
 import glob
+import logging
 import os
 import os.path
 import shutil
 import struct
 import sys
 
-from collections import namedtuple, defaultdict
+from collections import namedtuple, defaultdict, OrderedDict
 from datetime import datetime
 
 
+#
 # Set up logging
+#
+class ProdInfoAdapter(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        if 'extra' in kwargs:
+            try:
+                kwargs['extra'] = kwargs['extra']._asdict()
+            except AttributeError:
+                kwargs['extra'] = dict(zip(['site', 'volume_id'], kwargs['extra']))
+        else:
+            kwargs['extra'] = self.extra
+        return msg, kwargs
+
+
 def init_logger():
-    import logging
     import logging.handlers
     import socket
 
@@ -27,21 +41,38 @@ def init_logger():
     except (FileNotFoundError, socket.error):
         handler = logging.StreamHandler()
 
-    fmt = '%(filename)s [%(funcName)s]: %(message)s'
+    fmt = '%(filename)s [%(funcName)s]: [%(site)s %(volume_id)s] %(message)s'
     handler.setFormatter(logging.Formatter(fmt=fmt))
     logger.addHandler(handler)
+    logger = ProdInfoAdapter(logger, {'site': '----', 'volume_id': '---'})
 
 
 def log_rmtree_error(func, path, exc):
     logger.error('Error removing (%s %s)', func, path)
 
 
-# Raises an EOFError if we get a 0 byte read, which is by definition an EOF in Python
-async def check_read(fobj, num_bytes):
-    data = await fobj.readexactly(num_bytes)
-    if data:
-        return data
-    raise EOFError('Got 0 byte read.')
+#
+# Keeping stats
+#
+class ChunkStats(object):
+    def __init__(self, fname):
+        import sqlite3
+        self._conn = sqlite3.connect(fname)
+        try:
+            self._conn.execute('CREATE TABLE volumes '
+                               '(site text, date timestamp, volume integer, count integer, '
+                               'missing_start integer, missing_chunks text)')
+        except sqlite3.OperationalError:
+            pass
+
+    def log_volume(self, prod_info, num_chunks, missing_start, missing):
+        self._conn.execute('INSERT INTO volumes VALUES(?,?,?,?,?,?)',
+                           (prod_info.site, prod_info.dt, prod_info.volume_id, num_chunks,
+                            int(missing_start), ','.join(missing)))
+        self._conn.commit()
+
+    def __del__(self):
+        self._conn.close()
 
 #
 # LDM processing stuff
@@ -56,6 +87,8 @@ _ProdInfo = namedtuple('ProdInfo',
 
 
 class ProdInfo(_ProdInfo):
+    __slots__ = _ProdInfo.__slots__  # To fix _asdict(). See Python #249358
+
     def __str__(self):
         mod = self._replace(dt=self.dt.strftime('%Y%m%d%H%M%S'), chunk_id=str(self.chunk_id),
                             volume_id=str(self.volume_id))
@@ -80,6 +113,14 @@ class ProdInfo(_ProdInfo):
         return hdr_struct.pack(version, date + 1, time * 1000, self.site)
 
 
+# Raises an EOFError if we get a 0 byte read, which is by definition an EOF in Python
+async def check_read(fobj, num_bytes):
+    data = await fobj.readexactly(num_bytes)
+    if data:
+        return data
+    raise EOFError('Got 0 byte read.')
+
+
 async def read_byte_string(fobj):
     data = await check_read(fobj, len_struct.size)
     slen, = len_struct.unpack(data)
@@ -102,7 +143,7 @@ async def read_metadata(fobj):
 #
 # Caching and storage of chunks
 #
-# Overriding defaultdict--essentially just to pass key to factory
+# Overriding defaultdict--essentially (at first) just to pass key to factory
 class VolumeStore(defaultdict):
     def __init__(self, cache_dir, gen_header):
         super(defaultdict, self).__init__()
@@ -115,12 +156,12 @@ class VolumeStore(defaultdict):
         return new
 
     def _create_store(self, key):
-        logger.debug('Creating store for: %s', key)
+        logger.debug('Creating store.', extra=key)
 
         # Check to see if we have previously written part to disk:
         cache = self.cache_dir(key)
         if os.path.exists(cache):
-            logger.debug('Loading previously stored chunks from: %s', cache)
+            logger.debug('Loading previously stored chunks from: %s', cache, extra=key)
             store = ChunkStore.loadfromdir(cache)
             shutil.rmtree(cache, onerror=log_rmtree_error)
         else:
@@ -143,12 +184,12 @@ class VolumeStore(defaultdict):
         return os.path.join(self._cache_dir, '.' + site, '%03d' % vol_num)
 
     def clear_old_caches(self, key):
-        logger.debug('Checking for old caches...')
+        logger.debug('Checking for old caches...', extra=key)
         # List all old cache directories for this site
         site, cur_vol = key
         for fname in glob.glob(os.path.join(self._cache_dir, '.' + site, '[0-9][0-9][0-9]')):
             if os.path.isdir(fname):  # Minor sanity check that this is ours
-                logger.debug('Found: %s', fname)
+                logger.debug('Found: %s', fname, extra=key)
 
                 # Use this volume number as a proxy for time
                 num = int(os.path.basename(fname))
@@ -160,19 +201,19 @@ class VolumeStore(defaultdict):
 
                 # If the one we found is more than 30 past, delete it
                 if diff > 30:
-                    logger.info('Deleting old cache: %s', fname)
+                    logger.info('Deleting old cache: %s', fname, extra=key)
                     shutil.rmtree(fname, onerror=log_rmtree_error)
 
     def save(self):
         for key, chunks in self.items():
             cache = self.cache_dir(key)
-            logger.warn('Caching chunks to: %s', cache)
+            logger.warning('Caching chunks to: %s', cache, extra=key)
             chunks.savetodir(cache)
 
     async def finish(self):
         # Need to iterate over copy of keys because items could be removed during iteration
         for key in list(self.keys()):
-            logger.debug('Flushing chunk store queue for %s', key)
+            logger.debug('Flushing chunk store queue.', extra=key)
             store = self[key]
             await store.finish()
             store.task.cancel()
@@ -187,13 +228,11 @@ class VolumeStore(defaultdict):
             chunk = await src.get()
 
             # Find the appropriate store (will be created if necessary)
-            vol_num = chunk.prod_info.volume_id
-            site = chunk.prod_info.site
-            await self[site, vol_num].enqueue(chunk)
+            await self[chunk.prod_info.site, chunk.prod_info.volume_id].enqueue(chunk)
             src.task_done()
 
     def chunk_store_done(self, key):
-        logger.debug('Chunk store %s finished', key)
+        logger.debug('Chunk store finished.', extra=key)
         store = self.pop(key)
         self.vol_dest.put_nowait(store)
 
@@ -216,7 +255,7 @@ class ChunkStore(object):
         for fname in sorted(glob.glob(os.path.join(path, 'L2-BZIP2_*'))):
             name = os.path.basename(fname)
             cs.add(Chunk(prod_info=ProdInfo.fromstring(name), data=open(fname, 'rb').read()))
-        logger.warn('Loaded %d chunks from cache %s', len(cs), path)
+        logger.warning('Loaded %d chunks from cache %s', len(cs), path)
         return cs
 
     def savetodir(self, path):
@@ -225,8 +264,9 @@ class ChunkStore(object):
             os.makedirs(path)
 
         # Write the chunks
-        logger.warn('Saving %d chunks: [%s]', len(self), ' '.join(map(str,
-                                                                      self._store.keys())))
+        logger.warning('Saving %d chunks: [%s]', len(self),
+                       ' '.join(map(str, self._store.keys())),
+                       extra=list(self._store.values())[0].prod_info)
         for chunk in self:
             with open(os.path.join(path, str(chunk.prod_info)), 'wb') as outf:
                 if chunk.prod_info.chunk_id == self.first:
@@ -256,12 +296,11 @@ class ChunkStore(object):
         need_more = True
         while need_more:
             try:
-                fut = asyncio.wait_for(self._queue.get(), timeout)
-                chunk = await fut
+                chunk = await asyncio.wait_for(self._queue.get(), timeout)
                 need_more = self.add(chunk)
                 self._queue.task_done()
             except asyncio.TimeoutError:
-                logger.warn('Finishing due to timeout.')
+                logger.warning('Finishing due to timeout.', extra=chunk.prod_info)
                 need_more = False
 
         when_done()
@@ -272,10 +311,11 @@ class ChunkStore(object):
         chunk_id = chunk.prod_info.chunk_id
         if chunk_id != max_id + 1:
             if chunk_id in self._store:
-                logger.warn('Duplicate chunk: %d', chunk_id)
+                logger.warning('Duplicate chunk: %d', chunk_id, extra=chunk.prod_info)
             else:
-                logger.warn('Chunks out of order--Got: %d Max: %d', chunk_id, max_id)
-        logger.debug('Added chunk: %d', chunk_id)
+                logger.warning('Chunks out of order--Got: %d Max: %d', chunk_id, max_id,
+                               extra=chunk.prod_info)
+        logger.debug('Added chunk: %d', chunk_id, extra=chunk.prod_info)
 
         # Not only do we need to note the first block, we need to pop off the header bytes
         chunk_type = chunk.prod_info.chunk_type
@@ -298,8 +338,9 @@ class ChunkStore(object):
     @property
     def vol_hdr(self):
         if not self._vol_hdr and self._add_header:
-            hdr = list(self._store.values())[0].prod_info.as_vol_hdr()
-            logger.warn('Created volume header for first chunk: %s', self.vol_hdr)
+            pi = list(self._store.values())[0].prod_info
+            hdr = pi.as_vol_hdr()
+            logger.warning('Created volume header for first chunk: %s', self.vol_hdr, extra=pi)
             return hdr
         return self._vol_hdr
 
@@ -340,14 +381,15 @@ class ChunkWriter(object):
         if chunks.vol_hdr:
             self.write(chunks.vol_hdr)
         else:
-            logger.error('Missing volume header for: %s', self.fobj.filename)
+            logger.error('Missing volume header for: %s', self.fobj.filename,
+                         extra=next(iter(chunks)).prod_info)
 
         # Write the data chunks
         for num, chunk in enumerate(chunks):
             try:
                 self.write_chunk(chunk)
             except (OSError, IOError):
-                logger.error('Error writing chunk: %d', num)
+                logger.error('Error writing chunk: %d', num, extra=chunk.prod_info)
 
 
 class DiskFile(object):
@@ -439,12 +481,21 @@ class S3File(DiskFile):
 def when_item_done(loop, queue, name, item, future):
     try:
         future.result()
-        logger.info('Finished %s.', name)
+        logger.debug('Finished %s.', name)
     except IOError:
-        logger.warn('Failed to process %s. Queuing for retry...', name)
+        logger.warning('Failed to process %s. Queuing for retry...', name)
         loop.call_later(15, queue.put_nowait, item)
     finally:
         queue.task_done()
+
+
+async def write_chunks_s3(loop, queue, bucket_name):
+    while True:
+        chunk = await queue.get()
+        key = args.key.format(chunk.prod_info)
+        logger.info('Writing chunk to %s on S3 %s', key, bucket_name, extra=chunk.prod_info)
+        fut = loop.run_in_executor(None, upload_chunk_s3, bucket_name, key, chunk)
+        fut.add_done_callback(functools.partial(when_item_done, loop, queue, key, chunk))
 
 
 def upload_chunk_s3(bucket_name, key, chunk):
@@ -454,16 +505,10 @@ def upload_chunk_s3(bucket_name, key, chunk):
     S3File.put_checked(bucket, key, chunk.data)
 
 
-async def write_chunks_s3(loop, queue, bucket_name):
-    while True:
-        chunk = await queue.get()
-        key = args.key.format(chunk.prod_info)
-        logger.info('Writing chunk to %s on S3 %s', key, bucket_name)
-        fut = loop.run_in_executor(None, upload_chunk_s3, bucket_name, key, chunk)
-        fut.add_done_callback(functools.partial(when_item_done, loop, queue, key, chunk))
+async def save_volume(loop, queue, File, base, fmt, statsfile):
+    if statsfile:
+        stats = ChunkStats(statsfile)
 
-
-async def save_volume(loop, queue, File, base, fmt):
     while True:
         chunks = await queue.get()
 
@@ -475,7 +520,9 @@ async def save_volume(loop, queue, File, base, fmt):
 
         path = args.path.format(prod_info)
         logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
-                    chunks.last, len(chunks), ' '.join(chunks.missing()))
+                    chunks.last, len(chunks), ' '.join(chunks.missing()), extra=prod_info)
+        if statsfile:
+            stats.log_volume(prod_info, len(chunks), chunks.last < 0, chunks.missing())
 
         # Set up and write file in another thread
         file = File(base, path, fname, chunks.min_id())
@@ -498,9 +545,9 @@ async def read_chunk(stream):
     prod_id, prod_length = await read_metadata(stream)
     prod_info = ProdInfo.from_ldm_string(prod_id)
     logger.debug('Reading chunk {0.chunk_id} ({0.chunk_type}) for {0.site} '
-                 '{0.volume_id} {0.dt}'.format(prod_info))
+                 '{0.volume_id} {0.dt}'.format(prod_info), extra=prod_info)
     data = await stream.readexactly(prod_length)
-    logger.debug('Read chunk. (%d bytes)', len(data))
+    logger.debug('Read chunk. (%d bytes)', len(data), extra=prod_info)
     return Chunk(prod_info, data)
 
 
@@ -510,14 +557,14 @@ async def read_stream(loop, file, vols, sinks, tasks):
         lambda: asyncio.StreamReaderProtocol(stream_reader), file)
     try:
         while True:
-            logger.debug('Waiting for chunk...')
             chunk = await read_chunk(stream_reader)
             for sink in sinks:
                 await sink.put(chunk)
+            await asyncio.sleep(0.04)
     except EOFError:
         # If we get an EOF, flush out the queues top down, then save remaining
         # chunks to disk for reloading later.
-        logger.warn('Finishing due to EOF.')
+        logger.warning('Finishing due to EOF.')
         for sink in sinks:
             logger.debug('Flushing chunk queue.')
             await sink.join()
@@ -554,6 +601,8 @@ def setup_arg_parser():
                         action='store_true')
     parser.add_argument('-t', '--timeout', help='Timeout in seconds for waiting for data',
                         default=600, type=int)
+    parser.add_argument('-a', '--stats', help='Enable stats saving. Specifies name of '
+                        'sqlite3 file.', type=str)
     parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
                                                 'multiple times.', action='count', default=0)
     parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
@@ -587,7 +636,8 @@ if __name__ == '__main__':
     # Setup queue for saving volumes
     vol_queue = asyncio.Queue()
     FileClass, base = (S3File, args.s3) if args.s3 else (DiskFile, args.data_dir)
-    tasks = [asyncio.ensure_future(save_volume(loop, vol_queue, FileClass, base, args.format))]
+    tasks = [asyncio.ensure_future(save_volume(loop, vol_queue, FileClass, base, args.format,
+                                               args.stats))]
 
     # Set up storing chunks internally
     chunk_queue = asyncio.Queue()
