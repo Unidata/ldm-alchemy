@@ -485,6 +485,8 @@ def when_item_done(loop, queue, name, item, future):
     except IOError:
         logger.warning('Failed to process %s. Queuing for retry...', name)
         loop.call_later(15, queue.put_nowait, item)
+    except Exception:
+        logger.exception('Item done exception:', exc_info=sys.exc_info())
     finally:
         queue.task_done()
 
@@ -492,10 +494,14 @@ def when_item_done(loop, queue, name, item, future):
 async def write_chunks_s3(loop, queue, bucket_name):
     while True:
         chunk = await queue.get()
-        key = args.key.format(chunk.prod_info)
-        logger.info('Writing chunk to %s on S3 %s', key, bucket_name, extra=chunk.prod_info)
-        fut = loop.run_in_executor(None, upload_chunk_s3, bucket_name, key, chunk)
-        fut.add_done_callback(functools.partial(when_item_done, loop, queue, key, chunk))
+        try:
+            key = args.key.format(chunk.prod_info)
+            logger.debug('Writing chunk to %s on S3 %s', key, bucket_name,
+                         extra=chunk.prod_info)
+            fut = loop.run_in_executor(None, upload_chunk_s3, bucket_name, key, chunk)
+            fut.add_done_callback(functools.partial(when_item_done, loop, queue, key, chunk))
+        except Exception:
+            logger.exception('write_chunks_s3 exception:', exc_info=sys.exc_info())
 
 
 def upload_chunk_s3(bucket_name, key, chunk):
@@ -512,22 +518,26 @@ async def save_volume(loop, queue, File, base, fmt, statsfile):
     while True:
         chunks = await queue.get()
 
-        # Determine file name
-        prod_info = next(iter(chunks)).prod_info
-        fname = args.filename.format(prod_info)
-        if fmt != 'raw':
-            fname += '.' + fmt
+        try:
+            # Determine file name
+            prod_info = next(iter(chunks)).prod_info
+            fname = args.filename.format(prod_info)
+            if fmt != 'raw':
+                fname += '.' + fmt
 
-        path = args.path.format(prod_info)
-        logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
-                    chunks.last, len(chunks), ' '.join(chunks.missing()), extra=prod_info)
-        if statsfile:
-            stats.log_volume(prod_info, len(chunks), chunks.last < 0, chunks.missing())
+            path = args.path.format(prod_info)
+            logger.info('File: %s (S:%d E:%d N:%d M:[%s])', fname, chunks.first,
+                        chunks.last, len(chunks), ' '.join(chunks.missing()), extra=prod_info)
+            if statsfile:
+                stats.log_volume(prod_info, len(chunks), chunks.last < 0, chunks.missing())
 
-        # Set up and write file in another thread
-        file = File(base, path, fname, chunks.min_id())
-        fut = loop.run_in_executor(None, write_file, file, fmt, chunks)
-        fut.add_done_callback(functools.partial(when_item_done, loop, queue, fname, chunks))
+            # Set up and write file in another thread
+            file = File(base, path, fname, chunks.min_id())
+            fut = loop.run_in_executor(None, write_file, file, fmt, chunks)
+            fut.add_done_callback(functools.partial(when_item_done, loop, queue, fname,
+                                                    chunks))
+        except Exception:
+            logger.exception('Save volume exception:', exc_info=sys.exc_info())
 
 
 def write_file(file, fmt, chunks):
