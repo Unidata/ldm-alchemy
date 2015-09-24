@@ -570,7 +570,6 @@ async def read_stream(loop, file, vols, sinks, tasks):
             chunk = await read_chunk(stream_reader)
             for sink in sinks:
                 await sink.put(chunk)
-            await asyncio.sleep(0.04)
     except EOFError:
         # If we get an EOF, flush out the queues top down, then save remaining
         # chunks to disk for reloading later.
