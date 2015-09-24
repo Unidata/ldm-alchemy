@@ -41,10 +41,10 @@ def init_logger():
     except (FileNotFoundError, socket.error):
         handler = logging.StreamHandler()
 
-    fmt = '%(filename)s [%(funcName)s]: [%(site)s %(volume_id)s] %(message)s'
+    fmt = '%(filename)s [%(funcName)s]: [%(site)s %(volume_id)03d] %(message)s'
     handler.setFormatter(logging.Formatter(fmt=fmt))
     logger.addHandler(handler)
-    logger = ProdInfoAdapter(logger, {'site': '----', 'volume_id': '---'})
+    logger = ProdInfoAdapter(logger, {'site': '----', 'volume_id': 0})
 
 
 def log_rmtree_error(func, path, exc):
