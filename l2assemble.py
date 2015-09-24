@@ -610,6 +610,8 @@ def setup_arg_parser():
                         action='store_true')
     parser.add_argument('-t', '--timeout', help='Timeout in seconds for waiting for data',
                         default=600, type=int)
+    parser.add_argument('--threads', help='Specify number of threads to use.', default=20,
+                        type=int)
     parser.add_argument('-a', '--stats', help='Enable stats saving. Specifies name of '
                         'sqlite3 file.', type=str)
     parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
@@ -628,6 +630,7 @@ def setup_arg_parser():
 
 if __name__ == '__main__':
     import asyncio
+    from concurrent.futures import ThreadPoolExecutor
 
     init_logger()
     args = setup_arg_parser().parse_args()
@@ -641,6 +644,7 @@ if __name__ == '__main__':
 
     # Set up event loop
     loop = asyncio.get_event_loop()
+    loop.set_default_executor(ThreadPoolExecutor(args.threads))
 
     # Setup queue for saving volumes
     vol_queue = asyncio.Queue()
