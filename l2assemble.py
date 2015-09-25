@@ -252,7 +252,8 @@ class ChunkStore(object):
     def loadfromdir(cls, path):
         # Go find all the appropriately named files in the directory and load them
         cs = ChunkStore()
-        for fname in sorted(glob.glob(os.path.join(path, 'L2-BZIP2_*'))):
+        for fname in sorted(glob.glob(os.path.join(path, 'L2-BZIP2_*')),
+                            key=lambda f: ProdInfo.fromstring(os.path.basename(f)).chunk_id):
             name = os.path.basename(fname)
             cs.add(Chunk(prod_info=ProdInfo.fromstring(name), data=open(fname, 'rb').read()))
         logger.warning('Loaded %d chunks from cache %s', len(cs), path)
