@@ -106,11 +106,11 @@ class ProdInfo(_ProdInfo):
         return cls.fromstring(s.replace('/', '_'))
 
     def as_vol_hdr(self):
-        version = b'AR2V00' + self.version[1:] + b'.' + self.volume_id
+        version = 'AR2V00' + self.version[1:] + '.' + str(self.volume_id)
         timestamp = (self.dt - datetime(1970, 1, 1)).total_seconds()
         date = int(timestamp // 86400)
         time = int(timestamp - date * 86400)
-        return hdr_struct.pack(version, date + 1, time * 1000, self.site)
+        return hdr_struct.pack(version.encode('ascii'), date + 1, time * 1000, self.site)
 
 
 # Raises an EOFError if we get a 0 byte read, which is by definition an EOF in Python
