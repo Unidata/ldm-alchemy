@@ -342,7 +342,7 @@ class ChunkStore(object):
         if not self._vol_hdr and self._add_header:
             pi = list(self._store.values())[0].prod_info
             hdr = pi.as_vol_hdr()
-            logger.warning('Created volume header for first chunk: %s', self.vol_hdr, extra=pi)
+            logger.warning('Created volume header for first chunk: %s', hdr, extra=pi)
             return hdr
         return self._vol_hdr
 
