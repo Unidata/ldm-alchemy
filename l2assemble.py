@@ -451,6 +451,7 @@ class S3File(DiskFile):
             error_code = int(e.response['Error']['Code'])
             if error_code == 404:
                 return False
+            raise IOError from e
         return True
 
     @staticmethod
