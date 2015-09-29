@@ -352,7 +352,7 @@ class ChunkStore(object):
 
     # List any blocks we missed
     def missing(self):
-        return map(str, set(range(1, self.last + 1)) - set(self._store.keys()))
+        return map(str, set(range(1, self.max_id() + 1)) - set(self._store.keys()))
 
 
 #
