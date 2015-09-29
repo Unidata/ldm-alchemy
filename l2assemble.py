@@ -361,6 +361,7 @@ class ChunkStore(object):
 class ChunkWriter(object):
     def __init__(self, fobj, fmt):
         self.fobj = fobj
+        self.needclose = False
         if fmt == 'raw':
             self._process_chunk = lambda chunk: chunk
         else:
@@ -368,8 +369,10 @@ class ChunkWriter(object):
             if fmt == 'gz':
                 import gzip
                 self.fobj = gzip.GzipFile(filename=self.fobj.filename, fileobj=fobj, mode='wb')
+                self.needclose = True
             elif fmt == 'bz2':
                 self.fobj = bz2.BZ2File(fobj, mode='wb')
+                self.needclose = True
             self._process_chunk = lambda chunk: bz2.decompress(chunk[4:])
 
     def write(self, data):
@@ -392,6 +395,9 @@ class ChunkWriter(object):
                 self.write_chunk(chunk)
             except (OSError, IOError):
                 logger.error('Error writing chunk: %d', num, extra=chunk.prod_info)
+
+        if self.needclose:
+            self.fobj.close()
 
 
 class DiskFile(object):
