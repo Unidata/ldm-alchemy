@@ -46,7 +46,8 @@ if __name__ == '__main__':
     radar = 'KFTG'
     vol = 494
     time_val = 10
-    proc = subprocess.Popen(['./l2assemble.py', '-vv', '-d', '.', '-t', str(time_val), radar],
+    proc = subprocess.Popen(['./l2assemble.py', '-vv', '-d', '.',
+                             '-t', str(time_val)],
                             stdout=sys.stdout, stdin=subprocess.PIPE, universal_newlines=False,
                             bufsize=40)
 
