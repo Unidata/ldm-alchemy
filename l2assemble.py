@@ -189,15 +189,15 @@ class VolumeStore(defaultdict):
             else:
                 store = ChunkStore()
 
+            # Remove any old cache directories
+            self.clear_old_caches(prod_info.to_key())
+
         # Pass in call-back to call when done. We don't use the standard future callback
         # because it will end up queued--we need to run immediately.
         store.task = asyncio.ensure_future(
             store.wait_for_chunks(self.timeout,
                                   functools.partial(self.chunk_store_done, key=prod_info)))
         store.ensure_header(self._gen_header)
-
-        # Remove any old cache directories
-        self.clear_old_caches(prod_info.to_key())
 
         return store
 
