@@ -33,6 +33,7 @@ def init_logger():
     import socket
 
     # Set up some kind of logging for crashes
+    os.makedirs('logs', exist_ok=True)
     faulthandler.enable(open('logs/l2assemble-crash.log', 'a'))
 
     # Set the global logger
