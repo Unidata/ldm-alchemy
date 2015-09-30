@@ -99,6 +99,15 @@ class ProdInfo(_ProdInfo):
                             volume_id=str(self.volume_id))
         return '_'.join(mod)
 
+    def __hash__(self):
+        return hash(self.to_key())
+
+    def __eq__(self, other):
+        return self.site == other.site and self.volume_id == other.volume_id
+
+    def to_key(self):
+        return self.site, self.volume_id
+
     @classmethod
     def fromstring(cls, s):
         c = cls(*s.split('_'))
@@ -151,37 +160,44 @@ async def read_metadata(fobj):
 #
 # Overriding defaultdict--essentially (at first) just to pass key to factory
 class VolumeStore(defaultdict):
-    def __init__(self, cache_dir, gen_header):
+    def __init__(self, cache_dir, gen_header, s3=None, s3_path_format=''):
         super(defaultdict, self).__init__()
         self._cache_dir = cache_dir
         self._gen_header = gen_header
+        self._s3_bucket = s3
+        self._s3_path = s3_path_format
 
     def __missing__(self, key):
         new = self._create_store(key)
         self[key] = new
         return new
 
-    def _create_store(self, key):
-        logger.debug('Creating store.', extra=key)
+    def _create_store(self, prod_info):
+        logger.debug('Creating store.', extra=prod_info)
 
         # Check to see if we have previously written part to disk:
-        cache = self.cache_dir(key)
-        if os.path.exists(cache):
-            logger.debug('Loading previously stored chunks from: %s', cache, extra=key)
-            store = ChunkStore.loadfromdir(cache)
-            shutil.rmtree(cache, onerror=log_rmtree_error)
+        if self._s3_bucket and prod_info.chunk_id > 1:
+            store = ChunkStore.loadfroms3(self._s3_bucket, self._s3_path.format(prod_info),
+                                          prod_info)
         else:
-            store = ChunkStore()
+            cache = self.cache_dir(prod_info.to_key())
+            if os.path.exists(cache):
+                logger.debug('Loading previously stored chunks from: %s', cache,
+                             extra=prod_info)
+                store = ChunkStore.loadfromdir(cache)
+                shutil.rmtree(cache, onerror=log_rmtree_error)
+            else:
+                store = ChunkStore()
 
         # Pass in call-back to call when done. We don't use the standard future callback
         # because it will end up queued--we need to run immediately.
         store.task = asyncio.ensure_future(
             store.wait_for_chunks(self.timeout,
-                                  functools.partial(self.chunk_store_done, key=key)))
+                                  functools.partial(self.chunk_store_done, key=prod_info)))
         store.ensure_header(self._gen_header)
 
         # Remove any old cache directories
-        self.clear_old_caches(key)
+        self.clear_old_caches(prod_info.to_key())
 
         return store
 
@@ -211,10 +227,11 @@ class VolumeStore(defaultdict):
                     shutil.rmtree(fname, onerror=log_rmtree_error)
 
     def save(self):
-        for key, chunks in self.items():
-            cache = self.cache_dir(key)
-            logger.warning('Caching chunks to: %s', cache, extra=key)
-            chunks.savetodir(cache)
+        if not self._s3_bucket:
+            for key, chunks in self.items():
+                cache = self.cache_dir(key.to_key())
+                logger.warning('Caching chunks to: %s', cache, extra=key)
+                chunks.savetodir(cache)
 
     async def finish(self):
         # Need to iterate over copy of keys because items could be removed during iteration
@@ -234,7 +251,7 @@ class VolumeStore(defaultdict):
             chunk = await src.get()
 
             # Find the appropriate store (will be created if necessary)
-            await self[chunk.prod_info.site, chunk.prod_info.volume_id].enqueue(chunk)
+            await self[chunk.prod_info].enqueue(chunk)
             src.task_done()
 
     def chunk_store_done(self, key):
@@ -257,7 +274,7 @@ class ChunkStore(object):
     @classmethod
     def loadfromdir(cls, path):
         # Go find all the appropriately named files in the directory and load them
-        cs = ChunkStore()
+        cs = cls()
         for fname in sorted(glob.glob(os.path.join(path, 'L2-BZIP2_*')),
                             key=lambda f: ProdInfo.fromstring(os.path.basename(f)).chunk_id):
             name = os.path.basename(fname)
@@ -279,6 +296,21 @@ class ChunkStore(object):
                 if chunk.prod_info.chunk_id == self.first:
                     outf.write(self.vol_hdr)
                 outf.write(chunk.data)
+
+    @classmethod
+    def loadfroms3(cls, bucket, key, prod_info):
+        import boto3
+        bucket = boto3.resource('s3').Bucket(bucket)
+
+        cs = cls()
+        prefix = '-'.join(key.split('-')[:-2])
+        for obj in bucket.objects.filter(Prefix=prefix):
+            name = os.path.basename(obj.key)
+            date, time, chunk, chunk_type = name.split('-')
+            pi = prod_info._replace(chunk_id=int(chunk), chunk_type=chunk_type)
+            cs.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
+        logger.warning('Loaded %d chunks from S3 cache %s', len(cs), prefix, extra=prod_info)
+        return cs
 
     def __len__(self):
         return len(self._store)
@@ -668,7 +700,8 @@ if __name__ == '__main__':
 
     # Set up storing chunks internally
     chunk_queue = asyncio.Queue()
-    volumes = VolumeStore(cache_dir=args.data_dir, gen_header=args.generate_header)
+    volumes = VolumeStore(cache_dir=args.data_dir, gen_header=args.generate_header,
+                          s3=args.save_chunks, s3_path_format=args.key)
     tasks.append(asyncio.ensure_future(volumes.wait_for_chunks(chunk_queue, vol_queue,
                                                                args.timeout)))
     queues = [chunk_queue]
