@@ -4,3 +4,4 @@ full_feed
 *.db
 *.ipynb
 data/
+logs/
