@@ -8,7 +8,7 @@ import shutil
 import struct
 import sys
 
-from collections import namedtuple, defaultdict, OrderedDict
+from collections import namedtuple, defaultdict
 from datetime import datetime
 
 
