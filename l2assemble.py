@@ -28,8 +28,12 @@ class ProdInfoAdapter(logging.LoggerAdapter):
 
 
 def init_logger():
+    import faulthandler
     import logging.handlers
     import socket
+
+    # Set up some kind of logging for crashes
+    faulthandler.enable(open('logs/l2assemble-crash.log', 'a'))
 
     # Set the global logger
     global logger
