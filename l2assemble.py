@@ -7,8 +7,10 @@ import os.path
 import shutil
 import struct
 import sys
+import threading
 
 from collections import namedtuple, defaultdict
+from contextlib import contextmanager
 from datetime import datetime
 
 
@@ -164,7 +166,7 @@ class VolumeStore(defaultdict):
         super(defaultdict, self).__init__()
         self._cache_dir = cache_dir
         self._gen_header = gen_header
-        self._s3_bucket = s3
+        self._s3_buckets = S3BucketPool(s3) if s3 else None
         self._s3_path = s3_path_format
 
     def __missing__(self, key):
@@ -176,8 +178,8 @@ class VolumeStore(defaultdict):
         logger.debug('Creating store.', extra=prod_info)
 
         # Check to see if we have previously written part to disk:
-        if self._s3_bucket and prod_info.chunk_id > 1:
-            store = ChunkStore.loadfroms3(self._s3_bucket, self._s3_path.format(prod_info),
+        if self._s3_buckets and prod_info.chunk_id > 1:
+            store = ChunkStore.loadfroms3(self._s3_buckets, self._s3_path.format(prod_info),
                                           prod_info)
         else:
             cache = self.cache_dir(prod_info.to_key())
@@ -227,7 +229,7 @@ class VolumeStore(defaultdict):
                     shutil.rmtree(fname, onerror=log_rmtree_error)
 
     def save(self):
-        if not self._s3_bucket:
+        if not self._s3_buckets:
             for key, chunks in self.items():
                 cache = self.cache_dir(key.to_key())
                 logger.warning('Caching chunks to: %s', cache, extra=key)
@@ -298,17 +300,15 @@ class ChunkStore(object):
                 outf.write(chunk.data)
 
     @classmethod
-    def loadfroms3(cls, bucket, key, prod_info):
-        import boto3
-        bucket = boto3.resource('s3').Bucket(bucket)
-
-        cs = cls()
-        prefix = '-'.join(key.split('-')[:-2])
-        for obj in bucket.objects.filter(Prefix=prefix):
-            name = os.path.basename(obj.key)
-            date, time, chunk, chunk_type = name.split('-')
-            pi = prod_info._replace(chunk_id=int(chunk), chunk_type=chunk_type)
-            cs.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
+    def loadfroms3(cls, bucket_pool, key, prod_info):
+        with bucket_pool.use() as bucket:
+            cs = cls()
+            prefix = '-'.join(key.split('-')[:-2])
+            for obj in bucket.objects.filter(Prefix=prefix):
+                name = os.path.basename(obj.key)
+                date, time, chunk, chunk_type = name.split('-')
+                pi = prod_info._replace(chunk_id=int(chunk), chunk_type=chunk_type)
+                cs.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
         logger.warning('Loaded %d chunks from S3 cache %s', len(cs), prefix, extra=prod_info)
         return cs
 
@@ -467,14 +467,12 @@ class DiskFile(object):
 
 
 class S3File(DiskFile):
-    def __init__(self, bucket_name, path, name, fallback_num):
-        import boto3
+    def __init__(self, bucket_pool, path, name, fallback_num):
         from io import BytesIO
 
-        logger.debug('Writing to S3 bucket: %s', bucket_name)
-        s3 = boto3.resource('s3')
+        logger.debug('Writing to S3 bucket: %s', bucket_pool.bucket_name)
         self.filename = name
-        self._bucket = s3.Bucket(bucket_name)
+        self._bucket_pool = bucket_pool
         self._key = path + '/' + name
         self._fobj = BytesIO()
         self._fallback_num = fallback_num
@@ -512,12 +510,13 @@ class S3File(DiskFile):
         data = self._fobj.getvalue()
 
         # Get the object and try to make sure it doesn't exist
-        obj = self._bucket.Object(self._key)
-        if self._exists(obj):
-            obj = self._bucket.Object(self.fallback(self._key, self._fallback_num))
+        with self._bucket_pool.use() as bucket:
+            obj = bucket.Object(self._key)
+            if self._exists(obj):
+                obj = bucket.Object(self.fallback(self._key, self._fallback_num))
 
-        # Upload to S3
-        self.put_checked(self._bucket, obj.key, data)
+            # Upload to S3
+            self.put_checked(bucket, obj.key, data)
         super(S3File, self).close()
 
 
@@ -537,24 +536,22 @@ def when_item_done(loop, queue, name, item, future):
         queue.task_done()
 
 
-async def write_chunks_s3(loop, queue, bucket_name):
+async def write_chunks_s3(loop, queue, bucket_pool):
     while True:
         chunk = await queue.get()
         try:
             key = args.key.format(chunk.prod_info)
-            logger.debug('Writing chunk to %s on S3 %s', key, bucket_name,
+            logger.debug('Writing chunk to %s on S3 %s', key, bucket_pool.bucket_name,
                          extra=chunk.prod_info)
-            fut = loop.run_in_executor(None, upload_chunk_s3, bucket_name, key, chunk)
+            fut = loop.run_in_executor(None, upload_chunk_s3, bucket_pool, key, chunk)
             fut.add_done_callback(functools.partial(when_item_done, loop, queue, key, chunk))
         except Exception:
             logger.exception('write_chunks_s3 exception:', exc_info=sys.exc_info())
 
 
-def upload_chunk_s3(bucket_name, key, chunk):
-    import boto3
-    s3 = boto3.resource('s3')
-    bucket = s3.Bucket(bucket_name)
-    S3File.put_checked(bucket, key, chunk.data)
+def upload_chunk_s3(pool, key, chunk):
+    with pool.use() as bucket:
+        S3File.put_checked(bucket, key, chunk.data)
 
 
 async def save_volume(loop, queue, File, base, fmt, statsfile):
@@ -632,6 +629,39 @@ async def read_stream(loop, file, vols, sinks, tasks):
 
 
 #
+# Pool for S3 access objects
+#
+class S3BucketPool(object):
+    def __init__(self, bucket):
+        import queue
+        self._queue = queue.Queue()
+        self._create_lock = threading.Lock()
+        self.bucket_name = bucket
+
+    def borrow(self):
+        if self._queue.empty():
+            with self._create_lock:
+                import boto3
+                return boto3.session.Session().resource('s3').Bucket(self.bucket_name)
+
+        return self._queue.get()
+
+    def put(self, item):
+        self._queue.put(item)
+
+    @contextmanager
+    def use(self):
+        obj = self.borrow()
+        try:
+            yield obj
+        except Exception as e:
+            yield None
+            raise e
+        finally:
+            self.put(obj)
+
+
+#
 # Argument parsing
 #
 def setup_arg_parser():
@@ -694,7 +724,7 @@ if __name__ == '__main__':
 
     # Setup queue for saving volumes
     vol_queue = asyncio.Queue()
-    FileClass, base = (S3File, args.s3) if args.s3 else (DiskFile, args.data_dir)
+    FileClass, base = (S3File, S3BucketPool(args.s3)) if args.s3 else (DiskFile, args.data_dir)
     tasks = [asyncio.ensure_future(save_volume(loop, vol_queue, FileClass, base, args.format,
                                                args.stats))]
 
@@ -709,7 +739,8 @@ if __name__ == '__main__':
     # If we need to save the chunks to s3, set that up as well
     if args.save_chunks:
         s3_queue = asyncio.Queue()
-        tasks.append(asyncio.ensure_future(write_chunks_s3(loop, s3_queue, args.save_chunks)))
+        bucket_pool = S3BucketPool(args.save_chunks)
+        tasks.append(asyncio.ensure_future(write_chunks_s3(loop, s3_queue, bucket_pool)))
         queues.append(s3_queue)
 
     # Add callback for stdin and start loop
