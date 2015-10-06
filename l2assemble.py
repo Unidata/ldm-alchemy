@@ -573,7 +573,7 @@ async def save_volume(loop, queue, File, base, fmt, statsfile):
             # Decide how to log
             missing = list(chunks.missing())
             status = 'incomplete' if missing or chunks.last < 1 else 'complete'
-            logger.info('%s %s %d %d %d [%s])', fname, status, chunks.first,
+            logger.info('%s %s %d %d %d [%s]', fname, status, chunks.first,
                         chunks.last, len(chunks), ' '.join(missing), extra=prod_info)
             if statsfile:
                 stats.log_volume(prod_info, len(chunks), chunks.last < 0, chunks.missing())
