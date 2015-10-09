@@ -45,11 +45,10 @@ if __name__ == '__main__':
         try:
             proc = find_proc(args.name)
             if not proc:
-                print('%s not found!' % args.name)
                 time.sleep(args.interval)
             else:
                 while True:
                     dump_stats(client, proc)
                     time.sleep(args.interval)
         except psutil.NoSuchProcess:
-            print('%s died!' % args.name)
+            pass
