@@ -213,6 +213,8 @@ class VolumeStore(defaultdict):
 
                 # Remove any old cache directories
                 self.clear_old_caches(prod_info.to_key())
+        else:
+            store.ready.set()
 
         # Pass in call-back to call when done. We don't use the standard future callback
         # because it will end up queued--we need to run immediately.
