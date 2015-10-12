@@ -163,37 +163,56 @@ async def read_metadata(fobj):
 #
 # Overriding defaultdict--essentially (at first) just to pass key to factory
 class VolumeStore(defaultdict):
-    def __init__(self, cache_dir, gen_header, s3=None, s3_path_format=''):
+    RELOAD_FILE = '.vols_restart'
+
+    def __init__(self, loop, cache_dir, gen_header, s3=None, s3_path_format=''):
         super(defaultdict, self).__init__()
+        self._loop = loop
         self._cache_dir = cache_dir
         self._gen_header = gen_header
         self._s3_buckets = S3BucketPool(s3) if s3 else None
         self._s3_path = s3_path_format
 
-    def __missing__(self, key):
-        new = self._create_store(key)
+    def _reload_vols(self):
+        if os.path.exists(self.RELOAD_FILE):
+            with open(self.RELOAD_FILE, 'r') as reload:
+                for line in reload:
+                    line = line.rstrip()  # Pop off newline
+                    if line:
+                        logger.info('Reloading: %s', line)
+                        pi = ProdInfo.fromstring(line)
+                        self.__missing__(pi, force_load=True)  # Trigger creation
+            os.remove(self.RELOAD_FILE)
+
+    def __missing__(self, key, force_load=False):
+        new = self._create_store(key, force_load)
         self[key] = new
         return new
 
-    def _create_store(self, prod_info):
+    def _create_store(self, prod_info, force_load):
         logger.debug('Creating store.', extra=prod_info)
 
-        # Check to see if we have previously written part to disk:
-        if self._s3_buckets and prod_info.chunk_id > 1:
-            store = ChunkStore.loadfroms3(self._s3_buckets, self._s3_path.format(prod_info),
-                                          prod_info)
-        else:
-            cache = self.cache_dir(prod_info.to_key())
-            if os.path.exists(cache):
-                logger.debug('Loading previously stored chunks from: %s', cache,
-                             extra=prod_info)
-                store = ChunkStore.loadfromdir(cache)
-                shutil.rmtree(cache, onerror=log_rmtree_error)
-            else:
-                store = ChunkStore()
+        store = ChunkStore()
 
-            # Remove any old cache directories
-            self.clear_old_caches(prod_info.to_key())
+        # Only check for cache is we're creating a store for chunk # > 1 or if forced
+        if prod_info.chunk_id > 1 or force_load:
+            if self._s3_buckets:
+                fut = loop.run_in_executor(None, store.loadfroms3, self._s3_buckets,
+                                           self._s3_path.format(prod_info), prod_info)
+                fut.add_done_callback(lambda f: store.ready.set())
+            else:
+                cache = self.cache_dir(prod_info.to_key())
+                if os.path.exists(cache):
+                    logger.debug('Loading previously stored chunks from: %s', cache,
+                                 extra=prod_info)
+                    fut = loop.run_in_executor(None, store.loadfromdir, cache)
+                    fut.add_done_callback(lambda f: store.ready.set())
+                    fut.add_done_callback(lambda f: shutil.rmtree(cache, onerror=log_rmtree_error))
+                else:
+                    store.ready.set()
+
+                # Remove any old cache directories
+                self.clear_old_caches(prod_info.to_key())
 
         # Pass in call-back to call when done. We don't use the standard future callback
         # because it will end up queued--we need to run immediately.
@@ -243,12 +262,22 @@ class VolumeStore(defaultdict):
             store = self[key]
             await store.finish()
             store.task.cancel()
+
+        # Mark volumes that do not finish for reload in case we don't get any more chunks
+        if self:
+            with open(self.RELOAD_FILE, 'w') as reload:
+                for key in self:
+                    txt = str(key)
+                    logger.info('Marking for reload: %s', txt, extra=key)
+                    reload.write('%s\n' % txt)
+
         logger.debug('Flushing volumes queue')
         await self.vol_dest.join()
 
     async def wait_for_chunks(self, src, vol_dest, timeout):
         self.vol_dest = vol_dest
         self.timeout = timeout
+        self._reload_vols()
         while True:
             # Get the next chunk when available
             chunk = await src.get()
@@ -273,17 +302,15 @@ class ChunkStore(object):
         self._vol_hdr = b''
         self._add_header = False
         self._queue = asyncio.Queue()
+        self.ready = asyncio.Event()
 
-    @classmethod
-    def loadfromdir(cls, path):
+    def loadfromdir(self, path):
         # Go find all the appropriately named files in the directory and load them
-        cs = cls()
         for fname in sorted(glob.glob(os.path.join(path, 'L2-BZIP2_*')),
                             key=lambda f: ProdInfo.fromstring(os.path.basename(f)).chunk_id):
             name = os.path.basename(fname)
-            cs.add(Chunk(prod_info=ProdInfo.fromstring(name), data=open(fname, 'rb').read()))
-        logger.warning('Loaded %d chunks from cache %s', len(cs), path)
-        return cs
+            self.add(Chunk(prod_info=ProdInfo.fromstring(name), data=open(fname, 'rb').read()))
+        logger.warning('Loaded %d chunks from cache %s', len(self), path)
 
     def savetodir(self, path):
         # Create the directory if necessary
@@ -300,18 +327,15 @@ class ChunkStore(object):
                     outf.write(self.vol_hdr)
                 outf.write(chunk.data)
 
-    @classmethod
-    def loadfroms3(cls, bucket_pool, key, prod_info):
+    def loadfroms3(self, bucket_pool, key, prod_info):
         with bucket_pool.use() as bucket:
-            cs = cls()
             prefix = '-'.join(key.split('-')[:-2])
             for obj in bucket.objects.filter(Prefix=prefix):
                 name = os.path.basename(obj.key)
                 date, time, chunk, chunk_type = name.split('-')
                 pi = prod_info._replace(chunk_id=int(chunk), chunk_type=chunk_type)
-                cs.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
-        logger.warning('Loaded %d chunks from S3 cache %s', len(cs), prefix, extra=prod_info)
-        return cs
+                self.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
+        logger.warning('Loaded %d chunks from S3 cache %s', len(self), prefix, extra=prod_info)
 
     def __len__(self):
         return len(self._store)
@@ -337,13 +361,16 @@ class ChunkStore(object):
 
     async def wait_for_chunks(self, timeout, when_done):
         need_more = True
+        chunk = None
+        await self.ready.wait()
         while need_more:
             try:
                 chunk = await asyncio.wait_for(self._queue.get(), timeout)
                 need_more = self.add(chunk)
                 self._queue.task_done()
             except asyncio.TimeoutError:
-                logger.warning('Finishing due to timeout.', extra=chunk.prod_info)
+                kwargs = {'extra': chunk.prod_info} if chunk else {}
+                logger.warning('Finishing due to timeout.', **kwargs)
                 need_more = False
 
         when_done()
@@ -740,7 +767,7 @@ if __name__ == '__main__':
 
     # Set up storing chunks internally
     chunk_queue = asyncio.Queue()
-    volumes = VolumeStore(cache_dir=args.data_dir, gen_header=args.generate_header,
+    volumes = VolumeStore(loop=loop, cache_dir=args.data_dir, gen_header=args.generate_header,
                           s3=args.save_chunks, s3_path_format=args.key)
     tasks.append(asyncio.ensure_future(volumes.wait_for_chunks(chunk_queue, vol_queue,
                                                                args.timeout)))
