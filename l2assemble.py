@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import asyncio
 import functools
 import glob
 import logging
@@ -712,7 +713,6 @@ def setup_arg_parser():
 
 
 if __name__ == '__main__':
-    import asyncio
     from concurrent.futures import ThreadPoolExecutor
 
     init_logger()
