@@ -636,6 +636,12 @@ async def read_stream(loop, file, vols, sinks, tasks):
         transport.close()
 
 
+async def log_counts(loop, vols):
+    while True:
+        await asyncio.sleep(300)
+        logger.info('Volumes: %d Tasks: %d', len(vols), len(asyncio.Task.all_tasks(loop)))
+
+
 #
 # Pool for S3 access objects
 #
@@ -739,6 +745,9 @@ if __name__ == '__main__':
     tasks.append(asyncio.ensure_future(volumes.wait_for_chunks(chunk_queue, vol_queue,
                                                                args.timeout)))
     queues = [chunk_queue]
+
+    # Add task to periodically dump internal usage stats
+    tasks.append(asyncio.ensure_future(log_counts(loop, volumes)))
 
     # If we need to save the chunks to s3, set that up as well
     if args.save_chunks:
