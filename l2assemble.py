@@ -292,7 +292,7 @@ class ChunkStore(object):
         # Write the chunks
         logger.warning('Saving %d chunks: [%s]', len(self),
                        ' '.join(map(str, self._store.keys())),
-                       extra=list(self._store.values())[0].prod_info)
+                       extra=self.first_chunk().prod_info)
         for chunk in self:
             with open(os.path.join(path, str(chunk.prod_info)), 'wb') as outf:
                 if chunk.prod_info.chunk_id == self.first:
@@ -320,6 +320,9 @@ class ChunkStore(object):
 
     def max_id(self):
         return max(self._store.keys()) if self._store else 0
+
+    def first_chunk(self):
+        return list(self._store.values())[0]
 
     # Iterate in the order of the keys, but only return the value
     def __iter__(self):
@@ -377,7 +380,7 @@ class ChunkStore(object):
     @property
     def vol_hdr(self):
         if not self._vol_hdr and self._add_header:
-            pi = list(self._store.values())[0].prod_info
+            pi = self.first_chunk().prod_info
             hdr = pi.as_vol_hdr()
             logger.warning('Created volume header for first chunk: %s', hdr, extra=pi)
             self._vol_hdr = hdr
@@ -424,7 +427,7 @@ class ChunkWriter(object):
             self.write(chunks.vol_hdr)
         else:
             logger.error('Missing volume header for: %s', self.fobj.filename,
-                         extra=next(iter(chunks)).prod_info)
+                         extra=chunks.first_chunk().prod_info)
 
         # Write the data chunks
         for num, chunk in enumerate(chunks):
@@ -563,7 +566,7 @@ async def save_volume(loop, queue, File, base, fmt, statsfile):
 
         try:
             # Determine file name
-            prod_info = next(iter(chunks)).prod_info
+            prod_info = chunks.first_chunk().prod_info
             fname = args.filename.format(prod_info)
             if fmt != 'raw':
                 fname += '.' + fmt
