@@ -662,9 +662,6 @@ class S3BucketPool(object):
         obj = self.borrow()
         try:
             yield obj
-        except Exception as e:
-            yield None
-            raise e
         finally:
             self.put(obj)
 
