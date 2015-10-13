@@ -349,7 +349,7 @@ class ChunkStore(object):
         return max(self._store.keys()) if self._store else 0
 
     def first_chunk(self):
-        return list(self._store.values())[0]
+        return next(iter(self._store.values()))
 
     # Iterate in the order of the keys, but only return the value
     def __iter__(self):
