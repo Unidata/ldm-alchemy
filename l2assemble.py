@@ -769,17 +769,20 @@ if __name__ == '__main__':
     # Setup queue for saving volumes
     vol_queue = asyncio.Queue()
     if args.s3:
-        bucket_pool = S3BucketPool(args.s3)
-
         # Parse the additional arguments if given
         if args.s3_volume_args:
-            args.s3_volume_args = literal_eval(args.s3_volume_args)
+            try:
+                args.s3_volume_args = literal_eval(args.s3_volume_args)
+            except SyntaxError:
+                logger.warning('Error parsing args: %s', args.s3_volume_args)
+                args.s3_volume_args = dict()
         else:
             args.s3_volume_args = dict()
         logger.debug('Additional S3 volume args: %s', str(args.s3_volume_args))
 
-        def factory(path, fname, fallback):
-            return S3File(bucket_pool, path, fname, fallback, args.s3_volume_args)
+        # Binding the bucket as a default keeps from having problems if variable is re-used
+        def factory(path, fname, fallback, pool=S3BucketPool(args.s3)):
+            return S3File(pool, path, fname, fallback, args.s3_volume_args)
     else:
         def factory(path, fname, fallback):
             return DiskFile(args.data_dir, path, fname, fallback)
