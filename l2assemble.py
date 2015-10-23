@@ -500,7 +500,7 @@ class DiskFile(object):
 
 
 class S3File(DiskFile):
-    def __init__(self, bucket_pool, path, name, fallback_num):
+    def __init__(self, bucket_pool, path, name, fallback_num, s3_kwargs):
         from io import BytesIO
 
         logger.debug('Writing to S3 bucket: %s', bucket_pool.bucket_name)
@@ -509,6 +509,7 @@ class S3File(DiskFile):
         self._key = path + '/' + name
         self._fobj = BytesIO()
         self._fallback_num = fallback_num
+        self._s3_kwargs = s3_kwargs
 
     @staticmethod
     def _exists(obj):
@@ -523,7 +524,7 @@ class S3File(DiskFile):
         return True
 
     @staticmethod
-    def put_checked(bucket, key, data):
+    def put_checked(bucket, key, data, **kwargs):
         import botocore.exceptions
         import hashlib
         import base64
@@ -534,7 +535,7 @@ class S3File(DiskFile):
 
             # Write to S3
             logger.debug('Uploading to S3 under key: %s (md5: %s)', key, digest)
-            bucket.put_object(Key=key, Body=data, ContentMD5=digest)
+            bucket.put_object(Key=key, Body=data, ContentMD5=digest, **kwargs)
         except botocore.exceptions.ClientError as e:
             logger.error(str(e))
             raise IOError from e
@@ -549,7 +550,7 @@ class S3File(DiskFile):
                 obj = bucket.Object(self.fallback(self._key, self._fallback_num))
 
             # Upload to S3
-            self.put_checked(bucket, obj.key, data)
+            self.put_checked(bucket, obj.key, data, **self._s3_kwargs)
         super(S3File, self).close()
 
 
@@ -587,7 +588,7 @@ def upload_chunk_s3(pool, key, chunk):
         S3File.put_checked(bucket, key, chunk.data)
 
 
-async def save_volume(loop, queue, File, base, fmt, statsfile):
+async def save_volume(loop, queue, file_factory, fmt, statsfile):
     if statsfile:
         stats = ChunkStats(statsfile)
 
@@ -612,7 +613,7 @@ async def save_volume(loop, queue, File, base, fmt, statsfile):
                 stats.log_volume(prod_info, len(chunks), chunks.last < 0, chunks.missing())
 
             # Set up and write file in another thread
-            file = File(base, path, fname, chunks.min_id())
+            file = file_factory(path, fname, chunks.min_id())
             fut = loop.run_in_executor(None, write_file, file, fmt, chunks)
             fut.add_done_callback(functools.partial(when_item_done, loop, queue, fname,
                                                     chunks))
@@ -716,6 +717,9 @@ def setup_arg_parser():
                         type=str)
     parser.add_argument('-c', '--save-chunks', help='Write chunks to this S3 bucket.',
                         type=str)
+    parser.add_argument('--s3-volume-args', help='Additional arguments to pass when sending '
+                        ' volumes to S3. This is useful for passing along access controls.',
+                        type=str)
     parser.add_argument('-k', '--key', help='Key format string when storing chunks. Uses '
                         'Python string format specification',
                         default='{0.site}/{0.volume_id}/{0.dt:%Y%m%d-%H%M%S}-'
@@ -745,6 +749,7 @@ def setup_arg_parser():
 
 
 if __name__ == '__main__':
+    from ast import literal_eval
     from concurrent.futures import ThreadPoolExecutor
 
     init_logger()
@@ -763,8 +768,23 @@ if __name__ == '__main__':
 
     # Setup queue for saving volumes
     vol_queue = asyncio.Queue()
-    FileClass, base = (S3File, S3BucketPool(args.s3)) if args.s3 else (DiskFile, args.data_dir)
-    tasks = [asyncio.ensure_future(save_volume(loop, vol_queue, FileClass, base, args.format,
+    if args.s3:
+        bucket_pool = S3BucketPool(args.s3)
+
+        # Parse the additional arguments if given
+        if args.s3_volume_args:
+            args.s3_volume_args = literal_eval(args.s3_volume_args)
+        else:
+            args.s3_volume_args = dict()
+        logger.debug('Additional S3 volume args: %s', str(args.s3_volume_args))
+
+        def factory(path, fname, fallback):
+            return S3File(bucket_pool, path, fname, fallback, args.s3_volume_args)
+    else:
+        def factory(path, fname, fallback):
+            return DiskFile(args.data_dir, path, fname, fallback)
+
+    tasks = [asyncio.ensure_future(save_volume(loop, vol_queue, factory, args.format,
                                                args.stats))]
 
     # Set up storing chunks internally
