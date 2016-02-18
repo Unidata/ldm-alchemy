@@ -28,6 +28,21 @@ def init_logger():
     logger.setLevel(logging.INFO)
 
 
+#
+# Argument parsing
+#
+def setup_arg_parser():
+    import argparse
+
+    # Set up argument parsing
+    parser = argparse.ArgumentParser(description='Read NEXRAD Level2 LDM compressed blocks'
+                                     ' and assemble when they are done arriving.')
+    parser.add_argument('-d', '--decompress', help='Decompress file', action='store_true')
+    parser.add_argument('filename', help='Output filename', nargs=1)
+
+    return parser
+
+
 # Find WMO header and remove
 def remove_header(block):
     data = block[:64].decode('utf-8', 'ignore')
@@ -47,6 +62,8 @@ def remove_footer(block):
 
 try:
     init_logger()
+    parser = setup_arg_parser()
+    args = parser.parse_args()
     logger.debug('Started script.')
 
     # Read first block and remove header (no guarantee read() gets all data)
@@ -60,11 +77,18 @@ try:
         block = sys.stdin.buffer.read()
 
     # Make sure directory exists
-    target_file = sys.argv[1]
+    target_file = args.filename[0]
     target_dir = os.path.dirname(target_file)
     logger.debug('Writing to %s in %s', target_file, target_dir)
     if not os.path.exists(target_dir):
         os.makedirs(target_dir)
+
+    # Decompress file if necessary
+    if args.decompress:
+        import gzip
+        from io import BytesIO
+        reader = gzip.GzipFile(mode='rb', fileobj=BytesIO(b''.join(blocks)))
+        blocks = [reader.read()]
 
     # Write the data out
     with open(target_file, 'wb') as f:
