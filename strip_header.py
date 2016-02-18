@@ -38,6 +38,8 @@ def setup_arg_parser():
     parser = argparse.ArgumentParser(description='Read NEXRAD Level2 LDM compressed blocks'
                                      ' and assemble when they are done arriving.')
     parser.add_argument('-d', '--decompress', help='Decompress file', action='store_true')
+    parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
+                                                'multiple times.', action='count', default=0)
     parser.add_argument('filename', help='Output filename', nargs=1)
 
     return parser
@@ -64,6 +66,11 @@ try:
     init_logger()
     parser = setup_arg_parser()
     args = parser.parse_args()
+
+    # Figure out how noisy we should be. Start by clipping between -2 and 2.
+    total_level = min(2, max(-2, args.quiet - args.verbose))
+    logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
+
     logger.debug('Started script.')
 
     # Read first block and remove header (no guarantee read() gets all data)
