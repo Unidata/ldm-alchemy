@@ -50,14 +50,14 @@ try:
     logger.debug('Started script.')
 
     # Read first block and remove header (no guarantee read() gets all data)
-    block = remove_header(sys.stdin.read())
+    block = remove_header(sys.stdin.buffer.read())
     blocks = []
 
     # While we keep getting data, try to remove the footer. Easier than trying to remove footer
     # only for last block.
     while block:
         blocks.append(remove_footer(block))
-        block = sys.stdin.read()
+        block = sys.stdin.buffer.read()
 
     # Make sure directory exists
     target_file = sys.argv[1]
