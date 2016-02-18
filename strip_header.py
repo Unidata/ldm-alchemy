@@ -40,6 +40,8 @@ def setup_arg_parser():
     parser.add_argument('-d', '--decompress', help='Decompress file', action='store_true')
     parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
                                                 'multiple times.', action='count', default=0)
+    parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
+                                              'multiple times.', action='count', default=0)
     parser.add_argument('filename', help='Output filename', nargs=1)
 
     return parser
