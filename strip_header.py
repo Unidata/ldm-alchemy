@@ -55,7 +55,7 @@ def remove_header(block):
 
 # Remove WMO end of transmission block
 def remove_footer(block):
-    if block.endswith('\r\r\n\x03'):
+    if block.endswith(b'\r\r\n\x03'):
         return block[:-4]
     else:
         return block
