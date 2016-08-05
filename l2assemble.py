@@ -347,6 +347,9 @@ class ChunkStore(object):
     def __len__(self):
         return len(self._store)
 
+    def need_more(self):
+        return len(self) != self.last
+
     def min_id(self):
         return min(self._store.keys()) if self._store else 0
 
@@ -367,18 +370,17 @@ class ChunkStore(object):
         await self._queue.put(chunk)
 
     async def wait_for_chunks(self, timeout, when_done):
-        need_more = True
         chunk = None
         await self.ready.wait()
-        while need_more:
+        while self.need_more():
             try:
                 chunk = await asyncio.wait_for(self._queue.get(), timeout)
-                need_more = self.add(chunk)
+                self.add(chunk)
                 self._queue.task_done()
             except asyncio.TimeoutError:
                 kwargs = {'extra': chunk.prod_info} if chunk else {}
                 logger.warning('Finishing due to timeout.', **kwargs)
-                need_more = False
+                break
 
         when_done()
 
@@ -404,9 +406,6 @@ class ChunkStore(object):
             self.last = chunk_id
 
         self._store[chunk_id] = chunk
-
-        # Return whether we need more
-        return len(self) != self.last
 
     def ensure_header(self, f):
         self._add_header = f
