@@ -389,8 +389,9 @@ class ChunkStore(object):
         max_id = self.max_id()
         chunk_id = chunk.prod_info.chunk_id
         if chunk_id != max_id + 1:
-            if chunk_id in self._store and chunk_id > 1:
-                logger.warning('Duplicate chunk: %d', chunk_id, extra=chunk.prod_info)
+            if chunk_id in self._store:
+                if chunk_id > 1:
+                    logger.warning('Duplicate chunk: %d', chunk_id, extra=chunk.prod_info)
             else:
                 logger.warning('Chunks out of order--Got: %d Max: %d', chunk_id, max_id,
                                extra=chunk.prod_info)
