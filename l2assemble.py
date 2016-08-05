@@ -529,7 +529,6 @@ class S3File(DiskFile):
         import hashlib
         import base64
         try:
-
             # Calculate MD5 checksum for integrity
             digest = base64.b64encode(hashlib.md5(data).digest()).decode('ascii')
 
@@ -547,7 +546,11 @@ class S3File(DiskFile):
         with self._bucket_pool.use() as bucket:
             obj = bucket.Object(self._key)
             if self._exists(obj):
-                obj = bucket.Object(self.fallback(self._key, self._fallback_num))
+                # If the key already exists, only fallback if the new data are smaller.
+                # Otherwise, overwrite.
+                hdr = obj.get()
+                if len(data) < hdr['ContentLength']:
+                    obj = bucket.Object(self.fallback(self._key, self._fallback_num))
 
             # Upload to S3
             self.put_checked(bucket, obj.key, data, **self._s3_kwargs)
