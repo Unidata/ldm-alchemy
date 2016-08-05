@@ -181,40 +181,38 @@ class VolumeStore(defaultdict):
                     if line:
                         logger.info('Reloading: %s', line)
                         pi = ProdInfo.fromstring(line)
-                        self.__missing__(pi, force_load=True)  # Trigger creation
+                        self.__missing__(pi)  # Trigger creation
             os.remove(self.RELOAD_FILE)
 
-    def __missing__(self, key, force_load=False):
-        new = self._create_store(key, force_load)
+    def __missing__(self, key):
+        new = self._create_store(key)
         self[key] = new
         return new
 
-    def _create_store(self, prod_info, force_load):
+    def _create_store(self, prod_info):
         logger.debug('Creating store.', extra=prod_info)
 
         store = ChunkStore()
 
-        # Only check for cache is we're creating a store for chunk # > 1 or if forced
-        if prod_info.chunk_id > 1 or force_load:
-            if self._s3_buckets:
-                fut = loop.run_in_executor(None, store.loadfroms3, self._s3_buckets,
-                                           self._s3_path.format(prod_info), prod_info)
-                fut.add_done_callback(lambda f: store.ready.set())
-            else:
-                cache = self.cache_dir(prod_info.to_key())
-                if os.path.exists(cache):
-                    logger.debug('Loading previously stored chunks from: %s', cache,
-                                 extra=prod_info)
-                    fut = loop.run_in_executor(None, store.loadfromdir, cache)
-                    fut.add_done_callback(lambda f: store.ready.set())
-                    fut.add_done_callback(lambda f: shutil.rmtree(cache, onerror=log_rmtree_error))
-                else:
-                    store.ready.set()
-
-                # Remove any old cache directories
-                self.clear_old_caches(prod_info.to_key())
+        # Try to load any data for this volume from the cache
+        if self._s3_buckets:
+            fut = loop.run_in_executor(None, store.loadfroms3, self._s3_buckets,
+                                       self._s3_path.format(prod_info), prod_info)
+            fut.add_done_callback(lambda f: store.ready.set())
         else:
-            store.ready.set()
+            cache = self.cache_dir(prod_info.to_key())
+            if os.path.exists(cache):
+                logger.debug('Loading previously stored chunks from: %s', cache,
+                             extra=prod_info)
+                fut = loop.run_in_executor(None, store.loadfromdir, cache)
+                fut.add_done_callback(lambda f: store.ready.set())
+                fut.add_done_callback(lambda f: shutil.rmtree(cache,
+                                                              onerror=log_rmtree_error))
+            else:
+                store.ready.set()
+
+            # Remove any old cache directories
+            self.clear_old_caches(prod_info.to_key())
 
         # Pass in call-back to call when done. We don't use the standard future callback
         # because it will end up queued--we need to run immediately.
@@ -312,7 +310,7 @@ class ChunkStore(object):
                             key=lambda f: ProdInfo.fromstring(os.path.basename(f)).chunk_id):
             name = os.path.basename(fname)
             self.add(Chunk(prod_info=ProdInfo.fromstring(name), data=open(fname, 'rb').read()))
-        logger.warning('Loaded %d chunks from cache %s', len(self), path)
+        logger.info('Loaded %d chunks from cache %s', len(self), path)
 
     def savetodir(self, path):
         # Create the directory if necessary
@@ -336,8 +334,15 @@ class ChunkStore(object):
                 name = os.path.basename(obj.key)
                 date, time, chunk, chunk_type = name.split('-')
                 pi = prod_info._replace(chunk_id=int(chunk), chunk_type=chunk_type)
-                self.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
-        logger.warning('Loaded %d chunks from S3 cache %s', len(self), prefix, extra=prod_info)
+
+                # Skip the chunk that corresponds to the one that provoked us to load from the
+                # cache--this should keep us from annoying Duplicate Chunk messages. This
+                # occurs because it's possible for the chunk to show up in the S3 bucket
+                # before we load from cache.
+                if pi != prod_info:
+                    self.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
+
+        logger.info('Loaded %d chunks from S3 cache %s', len(self), prefix, extra=prod_info)
 
     def __len__(self):
         return len(self._store)
