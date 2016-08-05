@@ -328,6 +328,7 @@ class ChunkStore(object):
                 outf.write(chunk.data)
 
     def loadfroms3(self, bucket_pool, key, prod_info):
+        loaded = False
         with bucket_pool.use() as bucket:
             prefix = '-'.join(key.split('-')[:-2])
             for obj in bucket.objects.filter(Prefix=prefix):
@@ -338,9 +339,10 @@ class ChunkStore(object):
                 # When loading from cache, make sure we don't already have a chunk before
                 # adding it
                 if pi.chunk_id not in self._store:
+                    loaded = True
                     self.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
 
-        if len(self):
+        if loaded:
             logger.info('Loaded %d chunks from S3 cache %s', len(self), prefix,
                         extra=prod_info)
 
