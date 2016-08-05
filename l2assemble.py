@@ -337,7 +337,7 @@ class ChunkStore(object):
 
                 # When loading from cache, make sure we don't already have a chunk before
                 # adding it
-                if prod_info.chunk_id not in self._store:
+                if pi.chunk_id not in self._store:
                     self.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
 
         logger.info('Loaded %d chunks from S3 cache %s', len(self), prefix, extra=prod_info)
