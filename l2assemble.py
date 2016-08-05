@@ -340,7 +340,9 @@ class ChunkStore(object):
                 if pi.chunk_id not in self._store:
                     self.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
 
-        logger.info('Loaded %d chunks from S3 cache %s', len(self), prefix, extra=prod_info)
+        if len(self):
+            logger.info('Loaded %d chunks from S3 cache %s', len(self), prefix,
+                        extra=prod_info)
 
     def __len__(self):
         return len(self._store)
@@ -387,7 +389,7 @@ class ChunkStore(object):
         max_id = self.max_id()
         chunk_id = chunk.prod_info.chunk_id
         if chunk_id != max_id + 1:
-            if chunk_id in self._store:
+            if chunk_id in self._store and chunk_id > 1:
                 logger.warning('Duplicate chunk: %d', chunk_id, extra=chunk.prod_info)
             else:
                 logger.warning('Chunks out of order--Got: %d Max: %d', chunk_id, max_id,
