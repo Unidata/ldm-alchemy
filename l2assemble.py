@@ -335,11 +335,9 @@ class ChunkStore(object):
                 date, time, chunk, chunk_type = name.split('-')
                 pi = prod_info._replace(chunk_id=int(chunk), chunk_type=chunk_type)
 
-                # Skip the chunk that corresponds to the one that provoked us to load from the
-                # cache--this should keep us from annoying Duplicate Chunk messages. This
-                # occurs because it's possible for the chunk to show up in the S3 bucket
-                # before we load from cache.
-                if pi != prod_info:
+                # When loading from cache, make sure we don't already have a chunk before
+                # adding it
+                if prod_info.chunk_id not in self._store:
                     self.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
 
         logger.info('Loaded %d chunks from S3 cache %s', len(self), prefix, extra=prod_info)
