@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+# Copyright (c) 2015-2016 University Corporation for Atmospheric Research/Unidata
+# Distributed under the terms of the MIT License.
+# SPDX-License-Identifier: MIT
+
 import asyncio
 import functools
 import glob
