@@ -35,17 +35,12 @@ class ProdInfoAdapter(logging.LoggerAdapter):
 
 
 def init_logger():
-    import faulthandler
     import logging.handlers
     import socket
 
-    # Set up some kind of logging for crashes
-    os.makedirs('logs', exist_ok=True)
-    faulthandler.enable(open('logs/l2assemble-crash.log', 'a'))
-
     # Set the global logger
     global logger
-    logger = logging.getLogger('Level2Handler')
+    logger = logging.getLogger('LDMHandler')
 
     # Send logs to LDM's log if possible, otherwise send to stderr.
     try:
@@ -53,9 +48,22 @@ def init_logger():
     except (FileNotFoundError, socket.error):
         handler = logging.StreamHandler()
 
+    logger.addHandler(handler)
+    return handler
+
+
+def init_lv2_logger():
+    import faulthandler
+
+    # Set up some kind of logging for crashes
+    os.makedirs('logs', exist_ok=True)
+    faulthandler.enable(open('logs/l2assemble-crash.log', 'a'))
+
+    global logger
+    handler = init_logger()
+
     fmt = '%(filename)s [%(funcName)s]: [%(site)s %(volume_id)03d] %(message)s'
     handler.setFormatter(logging.Formatter(fmt=fmt))
-    logger.addHandler(handler)
     logger = ProdInfoAdapter(logger, {'site': '----', 'volume_id': 0})
 
 
@@ -766,7 +774,7 @@ if __name__ == '__main__':
     from ast import literal_eval
     from concurrent.futures import ThreadPoolExecutor
 
-    init_logger()
+    init_lv2_logger()
     args = setup_arg_parser().parse_args()
 
     # Figure out how noisy we should be. Start by clipping between -2 and 2.
