@@ -34,12 +34,11 @@ class ProdInfoAdapter(logging.LoggerAdapter):
         return msg, kwargs
 
 
-def init_logger():
+def init_logger(formatter=None):
     import logging.handlers
     import socket
 
     # Set the global logger
-    global logger
     logger = logging.getLogger('LDMHandler')
 
     # Send logs to LDM's log if possible, otherwise send to stderr.
@@ -48,8 +47,10 @@ def init_logger():
     except (FileNotFoundError, socket.error):
         handler = logging.StreamHandler()
 
+    if formatter:
+        handler.setFormatter(formatter)
     logger.addHandler(handler)
-    return handler
+    return logger
 
 
 def init_lv2_logger():
@@ -59,16 +60,15 @@ def init_lv2_logger():
     os.makedirs('logs', exist_ok=True)
     faulthandler.enable(open('logs/l2assemble-crash.log', 'a'))
 
-    global logger
-    handler = init_logger()
-
     fmt = '%(filename)s [%(funcName)s]: [%(site)s %(volume_id)03d] %(message)s'
-    handler.setFormatter(logging.Formatter(fmt=fmt))
-    logger = ProdInfoAdapter(logger, {'site': '----', 'volume_id': 0})
+    logger = init_logger(logging.Formatter(fmt=fmt))
+    return ProdInfoAdapter(logger, {'site': '----', 'volume_id': 0})
 
 
 def log_rmtree_error(func, path, exc):
     logger.error('Error removing (%s %s)', func, path)
+
+logger = logging.getLogger('LDMHandler')
 
 
 #
