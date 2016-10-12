@@ -5,6 +5,7 @@
 
 import asyncio
 from datetime import datetime
+import os.path
 from pathlib import Path
 
 from boltons.cacheutils import LRU
@@ -82,8 +83,8 @@ def create_netcdf_file(fname):
 
 
 class SurfaceNetcdf:
-    def __init__(self, dt, lookup):
-        out_path = Path('METAR_{dt:%Y%m%d_%H00}.nc'.format(dt=dt))
+    def __init__(self, dt, output_dir, lookup):
+        out_path = Path(os.path.join(output_dir, 'METAR_{dt:%Y%m%d_%H00}.nc'.format(dt=dt)))
         self.station_lookup = lookup
         self.stations = dict()
         if out_path.exists():
@@ -218,6 +219,7 @@ if __name__ == '__main__':
                                                 'multiple times.', action='count', default=0)
     parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
                                               'multiple times.', action='count', default=0)
+    parser.add_argument('-o', '--output', help='Output directory', type=str)
     args = parser.parse_args()
 
     # Figure out how noisy we should be. Start by clipping between -2 and 2.
@@ -237,7 +239,8 @@ if __name__ == '__main__':
     #     infile = sys.stdin
 
     station_lookup = StationLookup()
-    cache = LRU(max_size=10, on_miss=lambda key: SurfaceNetcdf(key, lookup=station_lookup))
+    cache = LRU(max_size=10, on_miss=lambda key: SurfaceNetcdf(key, output_dir=args.output,
+                                                               lookup=station_lookup))
 
     # Set up event loop
     loop = asyncio.get_event_loop()
