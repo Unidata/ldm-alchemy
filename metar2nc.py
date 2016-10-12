@@ -5,6 +5,7 @@
 
 import asyncio
 from datetime import datetime
+import logging
 import os.path
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from boltons.cacheutils import LRU
 from netCDF4 import Dataset, date2num
 from metpy.io.metar import MetarProduct
 from process_stations import StationLookup
-from l2assemble import read_metadata, init_logger
+from l2assemble import read_metadata
 
 
 def create_netcdf_file(fname):
@@ -212,7 +213,9 @@ if __name__ == '__main__':
     import argparse
     import sys
 
-    logger = init_logger()
+    logger = logging.getLogger('LDMHandler')
+    handler = logging.StreamHandler(open('metar2nc.log', 'at'))
+
     parser = argparse.ArgumentParser(description='Write METAR reports as data in a'
                                                  'netCDF file')
     parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
