@@ -215,31 +215,18 @@ if __name__ == '__main__':
     logger = init_logger()
     parser = argparse.ArgumentParser(description='Write METAR reports as data in a'
                                                  'netCDF file')
-    parser.add_argument('-f', '--file', type=str, nargs='*',
-                        help='Read data from file (rather than stdin)')
-    parser.add_argument('-g', '--glob', type=str, help='Glob to search for data')
     parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
                                                 'multiple times.', action='count', default=0)
     parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
                                               'multiple times.', action='count', default=0)
-    parser.add_argument('-o', '--output', help='Output directory', type=str)
+    parser.add_argument('-o', '--output', help='Output directory', type=str, default='.')
     args = parser.parse_args()
 
     # Figure out how noisy we should be. Start by clipping between -2 and 2.
     total_level = min(2, max(-2, args.quiet - args.verbose))
     logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
 
-    if args.file:
-        files = args.file
-    elif args.glob:
-        import glob
-        files = glob.glob(args.glob)
-
-    # if args.file:
-    #     infile = open(args.file, 'rt', encoding='latin1')
-    # else:
-    #     import sys
-    #     infile = sys.stdin
+    read_in = sys.stdin.buffer
 
     station_lookup = StationLookup()
     cache = LRU(max_size=10, on_miss=lambda key: SurfaceNetcdf(key, output_dir=args.output,
@@ -247,9 +234,6 @@ if __name__ == '__main__':
 
     # Set up event loop
     loop = asyncio.get_event_loop()
-
-    # Read directly from standard in buffer
-    read_in = sys.stdin.buffer
 
     product_queue = asyncio.Queue()
     tasks = [asyncio.ensure_future(parse_product(product_queue, cache)),
