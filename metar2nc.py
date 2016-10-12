@@ -192,7 +192,7 @@ async def parse_product(queue, cache):
     while True:
         prod = await queue.get()
         try:
-            product = MetarProduct(prod)
+            product = MetarProduct(prod.decode('latin-1')[1:-1])
             for metar in product.reports:
                 if not metar['null']:
                     key = metar['datetime'].replace(minute=0)
