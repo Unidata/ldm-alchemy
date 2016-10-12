@@ -215,6 +215,7 @@ if __name__ == '__main__':
 
     logger = logging.getLogger('LDMHandler')
     handler = logging.StreamHandler(open('metar2nc.log', 'at'))
+    logger.addHandler(handler)
 
     parser = argparse.ArgumentParser(description='Write METAR reports as data in a'
                                                  'netCDF file')
