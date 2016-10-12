@@ -179,9 +179,10 @@ async def read_stream(loop, input_stream, sinks, tasks):
         # If we get an EOF, flush out the queues top down.
         logger.warning('Finishing due to EOF.')
         for sink in sinks:
-            logger.debug('Flushing processing queue.')
+            logger.debug('Flushing processing queue. Items left: %d', sink.qsize())
             await sink.join()
         for t in tasks:
+            logger.debug('Cancelling task: %s', t)
             t.cancel()
         await asyncio.sleep(0.01)  # Just enough to let other things close out
         transport.close()
@@ -203,6 +204,8 @@ async def parse_product(queue, cache):
                     sink.add_ob(metar)
         except Exception as e:
             logger.exception('Processing error -- %s', prod, exc_info=e)
+        finally:
+            queue.task_done()
 
 
 if __name__ == '__main__':
