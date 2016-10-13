@@ -80,6 +80,9 @@ def create_netcdf_file(fname):
     create_data_variable('wind_speed', 'm/s', 'wind_speed')
     create_data_variable('wind_gust', 'm/s', 'wind_speed_of_gust')
 
+    var = ds.createVariable('report', str, data_dims)
+    var.coordinates = 'lon lat alt time stid'
+
     return ds
 
 
@@ -121,6 +124,7 @@ class SurfaceNetcdf:
         self.append_to_var('wind_speed', ob_num, wind.get('speed'))
         self.append_to_var('wind_gust', ob_num, wind.get('gust'))
 
+        self.ds['report'][ob_num] = ob['report']
         self.ds['time'][ob_num] = date2num(ob['datetime'], self.ds['time'].units)
         self.ds['index'][ob_num] = self.update_stations(ob['stid'])
 
