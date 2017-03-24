@@ -111,6 +111,7 @@ def copy_tile(input_ds, output_ds):
             dest_var[row_slice, col_slice] = src_var[:]
 
     output_ds.product_tiles_received += 1
+    output_ds.sync()
 
 
 def find_files(source_dir):
