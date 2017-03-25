@@ -258,10 +258,12 @@ class Assembler:
                     self._queue.task_done()
                     if (self.output.product_tiles_received >= self.output.number_product_tiles
                             and self._queue.empty()):
-                        logger.info('All tiles received.')
+                        logger.info('%s: All tiles received.',
+                                    os.path.basename(self.output_name))
                         break
                     else:
-                        logger.info('%d of %d tiles received.',
+                        logger.info('%s: %d of %d tiles received.',
+                                    os.path.basename(self.output_name),
                                     self.output.product_tiles_received,
                                     self.output.number_product_tiles)
 
