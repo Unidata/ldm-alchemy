@@ -12,3 +12,9 @@ handle and process (using multiple threads) the full level 2 stream.
 There are no supported APIs here yet, as right now this is just a monotlithic script. Eventually, this same
 infrastructure will be used for other LDM data feeds, at which point useful API separation/abstraction will
 present itself.
+
+## Requirements
+
+* Python >= 3.5
+* netCDF4-python (for goes-restitch.py)
+* psutil (for process-monitor.py)
