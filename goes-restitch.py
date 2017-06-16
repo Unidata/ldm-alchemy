@@ -315,7 +315,7 @@ def setup_arg_parser():
                         'string format specification',
                         default=os.path.join('{satellite}', '{scene}',
                                              'Channel{channel_id:02d}', '{dt:%Y%m%d}',
-                                             '{satellite}_{dt:%Y%m%d}_{dt:%H%M%S}_'
+                                             '{satellite}_{scene}_{dt:%Y%m%d}_{dt:%H%M%S}_'
                                              '{channel:.2f}_{resolution}_{lat}_{lon}.nc4'))
     parser.add_argument('-l', '--log', help='Filename to log information to. Uses standard'
                         ' out if not given.', type=str, default='')
