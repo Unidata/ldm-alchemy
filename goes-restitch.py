@@ -313,8 +313,8 @@ def setup_arg_parser():
                                               'multiple times.', action='count', default=0)
     parser.add_argument('-f', '--filename', help='Filename format string. Uses Python '
                         'string format specification',
-                        default=os.path.join('{satellite}', '{dt:%Y%m%d}', '{scene}',
-                                             'Channel{channel_id:02d}',
+                        default=os.path.join('{satellite}', '{scene}',
+                                             'Channel{channel_id:02d}', '{dt:%Y%m%d}',
                                              '{satellite}_{dt:%Y%m%d}_{dt:%H%M%S}_'
                                              '{channel:.2f}_{resolution}_{lat}_{lon}.nc4'))
     parser.add_argument('-l', '--log', help='Filename to log information to. Uses standard'
