@@ -302,7 +302,7 @@ def setup_arg_parser():
     parser = argparse.ArgumentParser(description='Assemble netCDF4 tiles of GOES data into '
                                                  'single files.')
     parser.add_argument('-d', '--data_dir', help='Base output directory', type=str,
-                        default='/data/ldm/pub/native/radar/level2')
+                        default='/data/ldm/pub/native/satellite/GOES')
     parser.add_argument('-t', '--timeout', help='Timeout in seconds for waiting for data',
                         default=15, type=int)
     parser.add_argument('-s', '--source', help='Source directory for data tiles', type=str,
