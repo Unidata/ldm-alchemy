@@ -33,10 +33,10 @@ def dataset_name(dataset, template):
     channel_id = dataset.channel_id
 
     # Get a resolution string like 500m or 1km
-    if dataset.source_spatial_resolution >= 1.0:
-        resolution = '{}km'.format(int(np.round(dataset.source_spatial_resolution)))
+    if dataset.request_spatial_resolution >= 1.0:
+        resolution = '{:.0f}km'.format(dataset.request_spatial_resolution)
     else:
-        resolution = '{}m'.format(int(np.round(dataset.source_spatial_resolution * 1000.)))
+        resolution = '{}m'.format(int(dataset.request_spatial_resolution * 10) * 100)
 
     # Get lon/lat out to 1 decimal point
     center_lat = '{0:.1f}{1}'.format(np.fabs(dataset.product_center_latitude),
@@ -126,7 +126,7 @@ def find_files(source_dir):
 
 async def read_disk(source_dir, sinks):
     r"""Read files from disk and asynchronously put them in queue.
-    
+
     Integrates find_files into our asynchronous framework.
     """
     for product in find_files(source_dir):
@@ -148,7 +148,7 @@ async def read_disk(source_dir, sinks):
 #
 class AssemblerManager(defaultdict):
     r"""Manages Assembler instances.
-    
+
     Dispatches tiles that have arrived and dispatches them to the appropriate
     file assembler, creating them as necessary.
     """
@@ -281,7 +281,7 @@ class Assembler:
 
 def read_netcdf_from_memory(mem):
     r"""Return a netCDF4.Dataset from data in memory.
-    
+
     Uses a temp file until we have support in netCDF4-python.
     """
     try:
