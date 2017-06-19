@@ -25,6 +25,10 @@ def copy_attrs(src, dest, skip):
         if not skip(attr):
             setattr(dest, attr, getattr(src, attr))
 
+            # Make the spheroid axis lengths CF-compliant
+            if attr in {'semi_major', 'semi_minor'} and hasattr(src, 'grid_mapping_name'):
+                setattr(dest, attr + '_axis', getattr(src, attr))
+
 
 def dataset_name(dataset, template):
     r"""Create an appropriate file path from a GOES dataset."""
