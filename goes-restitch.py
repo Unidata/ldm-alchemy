@@ -13,10 +13,15 @@ import os.path
 import sys
 import tempfile
 
-from netCDF4 import Dataset
+from netCDF4 import Dataset, date2num
 import numpy as np
 
 from ldm import init_logger, read_stream, remove_footer, remove_header
+
+
+def goes_time_to_dt(s):
+    r"""Parse the GOES-16 string-formatted time."""
+    return datetime.strptime(s, '%Y%j%H%M%S')
 
 
 def copy_attrs(src, dest, skip):
@@ -50,7 +55,7 @@ def dataset_name(dataset, template):
     scene = dataset.source_scene
 
     # Parse start time into something we can use
-    dt = datetime.strptime(dataset.start_date_time, '%Y%j%H%M%S')
+    dt = goes_time_to_dt(dataset.start_date_time)
     return template.format(satellite=sat_id, channel=channel, resolution=resolution, dt=dt,
                            scene=scene, lat=center_lat, lon=center_lon, channel_id=channel_id)
 
@@ -63,6 +68,16 @@ def init_nc_file(source_nc, output_nc):
     output_nc.created_by = 'ldm-alchemy'
     output_nc.createDimension('y', source_nc.product_rows)
     output_nc.createDimension('x', source_nc.product_columns)
+
+    # Create a scalar time coordinate variable from the string attribute
+    dt = goes_time_to_dt(source_nc.start_date_time)
+    time_var = output_nc.createVariable('time', np.int32)
+    time_var.units = 'seconds since {:%Y-%m-%d}'.format(dt)
+    time_var.standard_name = 'time'
+    time_var.long_name = 'The start date / time that the satellite began capturing the scene'
+    time_var.axis = 'T'
+    time_var.calendar = 'standard'
+    time_var[:] = date2num(dt, time_var.units)
 
     # Copy all the variables
     for var_name, old_var in source_nc.variables.items():
@@ -88,6 +103,10 @@ def init_nc_file(source_nc, output_nc):
         var = output_nc.createVariable(var_name, old_var.datatype,
                                        old_var.dimensions, **extra_args)
         copy_attrs(old_var, var, lambda a: '_FillValue' in a)
+
+        # Need to add time coordinate to any variable that cares
+        if hasattr(var, 'grid_mapping'):
+            var.coordinates = ' '.join(('time',) + var.dimensions)
 
     return output_nc
 
