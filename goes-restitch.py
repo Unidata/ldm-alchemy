@@ -54,6 +54,12 @@ def dataset_name(dataset, template):
                                      'E' if dataset.product_center_longitude > 0 else 'W')
     scene = dataset.source_scene
 
+    # Need special handling for full disk images to better name NWS regional images
+    if scene == 'FullDisk':
+        region = dataset.product_name.split('-')[0]
+        if region != 'TFD':
+            scene = region
+
     # Parse start time into something we can use
     dt = goes_time_to_dt(dataset.start_date_time)
     return template.format(satellite=sat_id, channel=channel, resolution=resolution, dt=dt,
