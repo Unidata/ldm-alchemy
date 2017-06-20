@@ -13,10 +13,15 @@ import os.path
 import sys
 import tempfile
 
-from netCDF4 import Dataset
+from netCDF4 import Dataset, date2num
 import numpy as np
 
 from ldm import init_logger, read_stream, remove_footer, remove_header
+
+
+def goes_time_to_dt(s):
+    r"""Parse the GOES-16 string-formatted time."""
+    return datetime.strptime(s, '%Y%j%H%M%S')
 
 
 def copy_attrs(src, dest, skip):
@@ -24,6 +29,10 @@ def copy_attrs(src, dest, skip):
     for attr in src.ncattrs():
         if not skip(attr):
             setattr(dest, attr, getattr(src, attr))
+
+            # Make the spheroid axis lengths CF-compliant
+            if attr in {'semi_major', 'semi_minor'} and hasattr(src, 'grid_mapping_name'):
+                setattr(dest, attr + '_axis', getattr(src, attr))
 
 
 def dataset_name(dataset, template):
@@ -33,10 +42,10 @@ def dataset_name(dataset, template):
     channel_id = dataset.channel_id
 
     # Get a resolution string like 500m or 1km
-    if dataset.source_spatial_resolution >= 1.0:
-        resolution = '{}km'.format(int(np.round(dataset.source_spatial_resolution)))
+    if dataset.request_spatial_resolution >= 1.0:
+        resolution = '{:.0f}km'.format(dataset.request_spatial_resolution)
     else:
-        resolution = '{}m'.format(int(np.round(dataset.source_spatial_resolution * 1000.)))
+        resolution = '{}m'.format(int(dataset.request_spatial_resolution * 10) * 100)
 
     # Get lon/lat out to 1 decimal point
     center_lat = '{0:.1f}{1}'.format(np.fabs(dataset.product_center_latitude),
@@ -45,8 +54,14 @@ def dataset_name(dataset, template):
                                      'E' if dataset.product_center_longitude > 0 else 'W')
     scene = dataset.source_scene
 
+    # Need special handling for full disk images to better name NWS regional images
+    if scene == 'FullDisk':
+        region = dataset.product_name.split('-')[0]
+        if region != 'TFD':
+            scene = region
+
     # Parse start time into something we can use
-    dt = datetime.strptime(dataset.start_date_time, '%Y%j%H%M%S')
+    dt = goes_time_to_dt(dataset.start_date_time)
     return template.format(satellite=sat_id, channel=channel, resolution=resolution, dt=dt,
                            scene=scene, lat=center_lat, lon=center_lon, channel_id=channel_id)
 
@@ -59,6 +74,16 @@ def init_nc_file(source_nc, output_nc):
     output_nc.created_by = 'ldm-alchemy'
     output_nc.createDimension('y', source_nc.product_rows)
     output_nc.createDimension('x', source_nc.product_columns)
+
+    # Create a scalar time coordinate variable from the string attribute
+    dt = goes_time_to_dt(source_nc.start_date_time)
+    time_var = output_nc.createVariable('time', np.int32)
+    time_var.units = 'seconds since {:%Y-%m-%d}'.format(dt)
+    time_var.standard_name = 'time'
+    time_var.long_name = 'The start date / time that the satellite began capturing the scene'
+    time_var.axis = 'T'
+    time_var.calendar = 'standard'
+    time_var[:] = date2num(dt, time_var.units)
 
     # Copy all the variables
     for var_name, old_var in source_nc.variables.items():
@@ -84,6 +109,10 @@ def init_nc_file(source_nc, output_nc):
         var = output_nc.createVariable(var_name, old_var.datatype,
                                        old_var.dimensions, **extra_args)
         copy_attrs(old_var, var, lambda a: '_FillValue' in a)
+
+        # Need to add time coordinate to any variable that cares
+        if hasattr(var, 'grid_mapping'):
+            var.coordinates = ' '.join(('time',) + var.dimensions)
 
     return output_nc
 
@@ -126,7 +155,7 @@ def find_files(source_dir):
 
 async def read_disk(source_dir, sinks):
     r"""Read files from disk and asynchronously put them in queue.
-    
+
     Integrates find_files into our asynchronous framework.
     """
     for product in find_files(source_dir):
@@ -148,7 +177,7 @@ async def read_disk(source_dir, sinks):
 #
 class AssemblerManager(defaultdict):
     r"""Manages Assembler instances.
-    
+
     Dispatches tiles that have arrived and dispatches them to the appropriate
     file assembler, creating them as necessary.
     """
@@ -281,7 +310,7 @@ class Assembler:
 
 def read_netcdf_from_memory(mem):
     r"""Return a netCDF4.Dataset from data in memory.
-    
+
     Uses a temp file until we have support in netCDF4-python.
     """
     try:
@@ -302,7 +331,7 @@ def setup_arg_parser():
     parser = argparse.ArgumentParser(description='Assemble netCDF4 tiles of GOES data into '
                                                  'single files.')
     parser.add_argument('-d', '--data_dir', help='Base output directory', type=str,
-                        default='/data/ldm/pub/native/radar/level2')
+                        default='/data/ldm/pub/native/satellite/GOES')
     parser.add_argument('-t', '--timeout', help='Timeout in seconds for waiting for data',
                         default=15, type=int)
     parser.add_argument('-s', '--source', help='Source directory for data tiles', type=str,
@@ -315,7 +344,7 @@ def setup_arg_parser():
                         'string format specification',
                         default=os.path.join('{satellite}', '{scene}',
                                              'Channel{channel_id:02d}', '{dt:%Y%m%d}',
-                                             '{satellite}_{dt:%Y%m%d}_{dt:%H%M%S}_'
+                                             '{satellite}_{scene}_{dt:%Y%m%d}_{dt:%H%M%S}_'
                                              '{channel:.2f}_{resolution}_{lat}_{lon}.nc4'))
     parser.add_argument('-l', '--log', help='Filename to log information to. Uses standard'
                         ' out if not given.', type=str, default='')
