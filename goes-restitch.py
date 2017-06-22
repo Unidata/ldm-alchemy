@@ -78,7 +78,7 @@ def init_nc_file(source_nc, output_nc):
     # Create a scalar time coordinate variable from the string attribute
     dt = goes_time_to_dt(source_nc.start_date_time)
     time_var = output_nc.createVariable('time', np.int32)
-    time_var.units = 'seconds since {:%Y-%m-%d}'.format(dt)
+    time_var.units = 'seconds since 2017-01-01'
     time_var.standard_name = 'time'
     time_var.long_name = 'The start date / time that the satellite began capturing the scene'
     time_var.axis = 'T'
