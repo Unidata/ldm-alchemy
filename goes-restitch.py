@@ -57,7 +57,15 @@ def dataset_name(dataset, template):
     # Need special handling for full disk images to better name NWS regional images
     if scene == 'FullDisk':
         region = dataset.product_name.split('-')[0]
-        if region != 'TFD':
+
+        # Handle some weird product names that start unexpectedly
+        if region.startswith(('G16_', 'G17_')):
+            region = region.split('_', maxsplit=1)[-1]
+
+        # TCONUS is just CONUS from the mode 4 full disk
+        if region == 'TCONUS':
+            scene = 'CONUS'
+        elif region != 'TFD':
             scene = region
 
     # Parse start time into something we can use
