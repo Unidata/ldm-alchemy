@@ -66,7 +66,7 @@ def dataset_name(dataset, template):
         # TCONUS is just CONUS from the mode 4 full disk
         if region == 'TCONUS':
             scene = 'CONUS'
-        elif region != 'TFD':
+        elif not region.endswith('FD'):
             scene = region
 
     # Parse start time into something we can use
