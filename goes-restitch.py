@@ -6,6 +6,7 @@
 import asyncio
 from collections import defaultdict
 from datetime import datetime
+import faulthandler
 import functools
 import logging
 import os
@@ -325,6 +326,8 @@ def read_netcdf_from_memory(mem):
         with tempfile.NamedTemporaryFile(delete=False) as temp:
             temp.write(remove_footer(remove_header(mem)))
         return Dataset(temp.name, 'r')
+    except Exception:
+        logger.exception('Error opening file for netCDF input')
     finally:
         os.remove(temp.name)
 
@@ -379,6 +382,9 @@ if __name__ == '__main__':
     loop = asyncio.get_event_loop()
     manager = AssemblerManager(args.data_dir, args.timeout, args.filename, loop)
     queues = [manager]
+
+    # Try to catch core dumps
+    faulthandler.enable(open('goes-restitch-crash.log', 'w'))
 
     # Read from disk if we're pointed to a file, otherwise read from stdin pipe
     try:
