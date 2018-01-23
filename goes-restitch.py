@@ -64,7 +64,7 @@ def dataset_name(dataset, template):
             region = region.split('_', maxsplit=1)[-1]
 
         # TCONUS is just CONUS from the mode 4 full disk
-        if region == 'TCONUS':
+        if region.endswith('CONUS'):
             scene = 'CONUS'
         elif not region.endswith('FD'):
             scene = region
