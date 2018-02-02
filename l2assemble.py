@@ -33,6 +33,10 @@ class ProdInfoAdapter(logging.LoggerAdapter):
             kwargs['extra'] = self.extra
         return msg, kwargs
 
+    @classmethod
+    def from_logger(cls, logger):
+        return cls(logger, {'site': '----', 'volume_id': 0})
+
 
 def init_logger(formatter=None):
     import logging.handlers
@@ -61,14 +65,13 @@ def init_lv2_logger():
     faulthandler.enable(open('logs/l2assemble-crash.log', 'a'))
 
     fmt = '%(filename)s [%(funcName)s]: [%(site)s %(volume_id)03d] %(message)s'
-    logger = init_logger(logging.Formatter(fmt=fmt))
-    return ProdInfoAdapter(logger, {'site': '----', 'volume_id': 0})
+    return init_logger(logging.Formatter(fmt=fmt))
 
 
 def log_rmtree_error(func, path, exc):
     logger.error('Error removing (%s %s)', func, path)
 
-logger = logging.getLogger('LDMHandler')
+logger = ProdInfoAdapter.from_logger(logging.getLogger('LDMHandler'))
 
 
 #
@@ -794,6 +797,7 @@ if __name__ == '__main__':
     # Figure out how noisy we should be. Start by clipping between -2 and 2.
     total_level = min(2, max(-2, args.quiet - args.verbose))
     logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
+    logger.debug('Logging initialized.')
 
     # Read directly from standard in buffer
     read_in = sys.stdin.buffer
