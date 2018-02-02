@@ -349,10 +349,14 @@ class ChunkStore(object):
                 pi = prod_info._replace(chunk_id=int(chunk), chunk_type=chunk_type)
 
                 # When loading from cache, make sure we don't already have a chunk before
-                # adding it
-                if pi.chunk_id not in self._store:
+                # adding it. If it matches our original one, queue it up instead of adding
+                # it directly.
+                chunk = Chunk(prod_info=pi, data=obj.get()['Body'].read())
+                if pi.chunk_id == prod_info.chunk_id:
+                    self.enqueue_nowait(chunk)
+                elif pi.chunk_id not in self._store:
                     loaded = True
-                    self.add(Chunk(prod_info=pi, data=obj.get()['Body'].read()))
+                    self.add(chunk)
 
         if loaded:
             logger.info('Loaded %d chunks from S3 cache %s', len(self), prefix,
@@ -386,10 +390,10 @@ class ChunkStore(object):
     async def wait_for_chunks(self, timeout, when_done):
         chunk = None
         await self.ready.wait()
-        while self.need_more():
+        while self.need_more() or not self._queue.empty():
             try:
                 chunk = await asyncio.wait_for(self._queue.get(), timeout)
-                self.add(chunk)
+                await self.add_wait(chunk)
                 self._queue.task_done()
             except asyncio.TimeoutError:
                 kwargs = {'extra': chunk.prod_info} if chunk else {}
@@ -397,6 +401,16 @@ class ChunkStore(object):
                 break
 
         when_done()
+
+    async def add_wait(self, chunk):
+        self.add(chunk)
+        # If we think we're done but we didn't just handle the end of volume,
+        # wait to make sure more chunks don't arrive.
+        if not self.need_more() and chunk.prod_info.chunk_type != 'E':
+            await asyncio.sleep(30)
+
+    def enqueue_nowait(self, chunk):
+        self._queue.put_nowait(chunk)
 
     # Add a chunk to our store. If this was the start or end, note that as well.
     def add(self, chunk):
