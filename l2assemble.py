@@ -153,7 +153,7 @@ class ProdInfo(_ProdInfo):
                 'ChunkType': {'DataType': 'String', 'StringValue': self.chunk_type}}
 
     def to_sns_message_dict(self):
-        return {'SiteID': self.site, 'DateTime': self.dt.strftime('%Y%m%d%H%M%S'),
+        return {'SiteID': self.site, 'DateTime': self.dt.isoformat(),
                 'VolumeID': self.volume_id, 'ChunkID': self.chunk_id,
                 'ChunkType': self.chunk_type, 'L2Version': self.version}
 
