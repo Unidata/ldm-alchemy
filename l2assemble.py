@@ -6,6 +6,7 @@
 import asyncio
 import functools
 import glob
+import json
 import logging
 import os
 import os.path
@@ -144,6 +145,12 @@ class ProdInfo(_ProdInfo):
         time = int(timestamp - date * 86400)
         return hdr_struct.pack(version.encode('ascii'), date + 1, time * 1000,
                                self.site.encode('ascii'))
+
+    def to_sns_filter_attrs(self):
+        """Turn into a set of appropriate filterable values for SNS."""
+        return {'SiteID': {'DataType': 'String', 'StringValue': self.site},
+                'VolumeID': {'DataType': 'Number', 'StringValue': str(self.volume_id)},
+                'ChunkType': {'DataType': 'String', 'StringValue': self.chunk_type}}
 
 
 # Raises an EOFError if we get a 0 byte read, which is by definition an EOF in Python
@@ -609,22 +616,27 @@ def when_item_done(loop, queue, name, item, future):
         queue.task_done()
 
 
-async def write_chunks_s3(loop, queue, bucket_pool):
+async def write_chunks_s3(loop, queue, bucket_pool, sns_pool):
     while True:
         chunk = await queue.get()
         try:
             key = args.key.format(chunk.prod_info)
             logger.debug('Writing chunk to %s on S3 %s', key, bucket_pool.bucket_name,
                          extra=chunk.prod_info)
-            fut = loop.run_in_executor(None, upload_chunk_s3, bucket_pool, key, chunk)
+            fut = loop.run_in_executor(None, upload_chunk_s3, bucket_pool, key, chunk, sns_pool)
             fut.add_done_callback(functools.partial(when_item_done, loop, queue, key, chunk))
         except Exception:
             logger.exception('write_chunks_s3 exception:', exc_info=sys.exc_info())
 
 
-def upload_chunk_s3(pool, key, chunk):
-    with pool.use() as bucket:
+def upload_chunk_s3(s3_pool, key, chunk, sns_pool):
+    with s3_pool.use() as bucket, sns_pool.use() as topic:
         S3File.put_checked(bucket, key, chunk.data)
+        prod_info = chunk.prod_info
+        message = {'S3Bucket': s3_pool.bucket_name, 'Key': key}
+        message.update(prod_info._asdict())
+        topic.publish(Message=json.dumps(message),
+                      MessageAttributes=prod_info.to_sns_filter_attrs())
 
 
 async def save_volume(loop, queue, file_factory, fmt, statsfile):
@@ -712,20 +724,27 @@ async def log_counts(loop, vols):
 
 
 #
-# Pool for S3 access objects
+# Pools for AWS access objects
 #
-class S3BucketPool(object):
-    def __init__(self, bucket):
+class SharedObjectPool(object):
+    """A shared pool of managed objects
+
+    Objects are created while a lock is held, then are doled out and returned using
+    a context manager.
+    """
+    _create_lock = threading.Lock()  # We want one lock among all subclasses
+
+    def __init__(self):
         import queue
         self._queue = queue.Queue()
-        self._create_lock = threading.Lock()
-        self.bucket_name = bucket
+
+    def _create_new(self):
+        pass
 
     def borrow(self):
         if self._queue.empty():
             with self._create_lock:
-                import boto3
-                return boto3.session.Session().resource('s3').Bucket(self.bucket_name)
+                return self._create_new()
 
         return self._queue.get()
 
@@ -739,6 +758,26 @@ class S3BucketPool(object):
             yield obj
         finally:
             self.put(obj)
+
+
+class S3BucketPool(SharedObjectPool):
+    def __init__(self, bucket):
+        super().__init__()
+        self.bucket_name = bucket
+
+    def _create_new(self):
+        import boto3
+        return boto3.session.Session().resource('s3').Bucket(self.bucket_name)
+
+
+class SNSBucketPool(SharedObjectPool):
+    def __init__(self, arn):
+        super().__init__()
+        self.sns_arn = arn
+
+    def _create_new(self):
+        import boto3
+        return boto3.session.Session().resource('sns').Topic(self.sns_arn)
 
 
 #
@@ -756,6 +795,8 @@ def setup_arg_parser():
                         type=str)
     parser.add_argument('-c', '--save-chunks', help='Write chunks to this S3 bucket.',
                         type=str)
+    parser.add_argument('--sns', help='When saving chunks, publish to this SNS topic',
+                        type=str, default='NewNEXRADLevel2ObjectFilterable')
     parser.add_argument('--s3-volume-args', help='Additional arguments to pass when sending '
                         ' volumes to S3. This is useful for passing along access controls.',
                         type=str)
@@ -843,9 +884,12 @@ if __name__ == '__main__':
 
     # If we need to save the chunks to s3, set that up as well
     if args.save_chunks:
+        import boto3
         s3_queue = asyncio.Queue()
         bucket_pool = S3BucketPool(args.save_chunks)
-        tasks.append(asyncio.ensure_future(write_chunks_s3(loop, s3_queue, bucket_pool)))
+        sns_pool = SNSBucketPool(boto3.client('sns').create_topic(args.sns))
+        tasks.append(asyncio.ensure_future(write_chunks_s3(loop, s3_queue, bucket_pool,
+                                                           sns_pool)))
         queues.append(s3_queue)
 
     # Add callback for stdin and start loop
