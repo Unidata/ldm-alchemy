@@ -840,58 +840,61 @@ if __name__ == '__main__':
     logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
     logger.debug('Logging initialized.')
 
-    # Read directly from standard in buffer
-    read_in = sys.stdin.buffer
+    try:
+        # Read directly from standard in buffer
+        read_in = sys.stdin.buffer
 
-    # Set up event loop
-    loop = asyncio.get_event_loop()
-    loop.set_default_executor(ThreadPoolExecutor(args.threads))
+        # Set up event loop
+        loop = asyncio.get_event_loop()
+        loop.set_default_executor(ThreadPoolExecutor(args.threads))
 
-    # Setup queue for saving volumes
-    vol_queue = asyncio.Queue()
-    if args.s3:
-        # Parse the additional arguments if given
-        if args.s3_volume_args:
-            try:
-                args.s3_volume_args = literal_eval(args.s3_volume_args)
-            except SyntaxError:
-                logger.warning('Error parsing args: %s', args.s3_volume_args)
+        # Setup queue for saving volumes
+        vol_queue = asyncio.Queue()
+        if args.s3:
+            # Parse the additional arguments if given
+            if args.s3_volume_args:
+                try:
+                    args.s3_volume_args = literal_eval(args.s3_volume_args)
+                except SyntaxError:
+                    logger.warning('Error parsing args: %s', args.s3_volume_args)
+                    args.s3_volume_args = dict()
+            else:
                 args.s3_volume_args = dict()
+            logger.debug('Additional S3 volume args: %s', str(args.s3_volume_args))
+
+            # Binding the bucket as a default keeps from having problems if variable is re-used
+            def factory(path, fname, fallback, pool=S3BucketPool(args.s3)):
+                return S3File(pool, path, fname, fallback, args.s3_volume_args)
         else:
-            args.s3_volume_args = dict()
-        logger.debug('Additional S3 volume args: %s', str(args.s3_volume_args))
+            def factory(path, fname, fallback):
+                return DiskFile(args.data_dir, path, fname, fallback)
 
-        # Binding the bucket as a default keeps from having problems if variable is re-used
-        def factory(path, fname, fallback, pool=S3BucketPool(args.s3)):
-            return S3File(pool, path, fname, fallback, args.s3_volume_args)
-    else:
-        def factory(path, fname, fallback):
-            return DiskFile(args.data_dir, path, fname, fallback)
+        tasks = [asyncio.ensure_future(save_volume(loop, vol_queue, factory, args.format,
+                                                   args.stats))]
 
-    tasks = [asyncio.ensure_future(save_volume(loop, vol_queue, factory, args.format,
-                                               args.stats))]
+        # Set up storing chunks internally
+        chunk_queue = asyncio.Queue()
+        volumes = VolumeStore(loop=loop, cache_dir=args.data_dir, gen_header=args.generate_header,
+                              s3=args.save_chunks, s3_path_format=args.key)
+        tasks.append(asyncio.ensure_future(volumes.wait_for_chunks(chunk_queue, vol_queue,
+                                                                   args.timeout)))
+        queues = [chunk_queue]
 
-    # Set up storing chunks internally
-    chunk_queue = asyncio.Queue()
-    volumes = VolumeStore(loop=loop, cache_dir=args.data_dir, gen_header=args.generate_header,
-                          s3=args.save_chunks, s3_path_format=args.key)
-    tasks.append(asyncio.ensure_future(volumes.wait_for_chunks(chunk_queue, vol_queue,
-                                                               args.timeout)))
-    queues = [chunk_queue]
+        # Add task to periodically dump internal usage stats
+        tasks.append(asyncio.ensure_future(log_counts(loop, volumes)))
 
-    # Add task to periodically dump internal usage stats
-    tasks.append(asyncio.ensure_future(log_counts(loop, volumes)))
+        # If we need to save the chunks to s3, set that up as well
+        if args.save_chunks:
+            import boto3
+            s3_queue = asyncio.Queue()
+            bucket_pool = S3BucketPool(args.save_chunks)
+            sns_pool = SNSBucketPool(boto3.client('sns').create_topic(args.sns))
+            tasks.append(asyncio.ensure_future(write_chunks_s3(loop, s3_queue, bucket_pool,
+                                                               sns_pool)))
+            queues.append(s3_queue)
 
-    # If we need to save the chunks to s3, set that up as well
-    if args.save_chunks:
-        import boto3
-        s3_queue = asyncio.Queue()
-        bucket_pool = S3BucketPool(args.save_chunks)
-        sns_pool = SNSBucketPool(boto3.client('sns').create_topic(args.sns))
-        tasks.append(asyncio.ensure_future(write_chunks_s3(loop, s3_queue, bucket_pool,
-                                                           sns_pool)))
-        queues.append(s3_queue)
-
-    # Add callback for stdin and start loop
-    loop.run_until_complete(read_stream(loop, read_in, volumes, queues, tasks))
-    loop.close()
+        # Add callback for stdin and start loop
+        loop.run_until_complete(read_stream(loop, read_in, volumes, queues, tasks))
+        loop.close()
+    except Exception as e:
+        logger.exception('Exception raised!', exc_info=e)
