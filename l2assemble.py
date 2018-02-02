@@ -152,6 +152,11 @@ class ProdInfo(_ProdInfo):
                 'VolumeID': {'DataType': 'Number', 'StringValue': str(self.volume_id)},
                 'ChunkType': {'DataType': 'String', 'StringValue': self.chunk_type}}
 
+    def to_sns_message_dict(self):
+        return {'SiteID': self.site, 'DateTime': self.dt.strftime('%Y%m%d%H%M%S'),
+                'VolumeID': self.volume_id, 'ChunkID': self.chunk_id,
+                'ChunkType': self.chunk_type, 'L2Version': self.version}
+
 
 # Raises an EOFError if we get a 0 byte read, which is by definition an EOF in Python
 async def check_read(fobj, num_bytes):
@@ -634,7 +639,7 @@ def upload_chunk_s3(s3_pool, key, chunk, sns_pool):
         S3File.put_checked(bucket, key, chunk.data)
         prod_info = chunk.prod_info
         message = {'S3Bucket': s3_pool.bucket_name, 'Key': key}
-        message.update(prod_info._asdict())
+        message.update(prod_info.to_sns_message_dict())
         topic.publish(Message=json.dumps(message),
                       MessageAttributes=prod_info.to_sns_filter_attrs())
 
@@ -771,9 +776,10 @@ class S3BucketPool(SharedObjectPool):
 
 
 class SNSBucketPool(SharedObjectPool):
-    def __init__(self, arn):
+    def __init__(self, name):
+        import boto3
         super().__init__()
-        self.sns_arn = arn
+        self.sns_arn = boto3.client('sns').create_topic(Name=name)['TopicArn']
 
     def _create_new(self):
         import boto3
@@ -888,7 +894,7 @@ if __name__ == '__main__':
             import boto3
             s3_queue = asyncio.Queue()
             bucket_pool = S3BucketPool(args.save_chunks)
-            sns_pool = SNSBucketPool(boto3.client('sns').create_topic(args.sns))
+            sns_pool = SNSBucketPool(args.sns)
             tasks.append(asyncio.ensure_future(write_chunks_s3(loop, s3_queue, bucket_pool,
                                                                sns_pool)))
             queues.append(s3_queue)
