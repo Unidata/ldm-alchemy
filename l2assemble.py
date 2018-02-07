@@ -149,8 +149,11 @@ class ProdInfo(_ProdInfo):
     def to_sns_filter_attrs(self):
         """Turn into a set of appropriate filterable values for SNS."""
         return {'SiteID': {'DataType': 'String', 'StringValue': self.site},
+                'DateTime': {'DataTYpe': 'String', 'StringValue': self.dt.isoformat()},
                 'VolumeID': {'DataType': 'Number', 'StringValue': str(self.volume_id)},
-                'ChunkType': {'DataType': 'String', 'StringValue': self.chunk_type}}
+                'ChunkID': {'DataType': 'Number', 'StringValue': str(self.chunk_id)},
+                'ChunkType': {'DataType': 'String', 'StringValue': self.chunk_type},
+                'L2Version': {'DataType': 'String', 'StringValue': self.version}}
 
     def to_sns_message_dict(self):
         return {'SiteID': self.site, 'DateTime': self.dt.isoformat(),
