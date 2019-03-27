@@ -89,7 +89,7 @@ try:
     target_file = args.filename[0]
     target_dir = os.path.dirname(target_file)
     logger.debug('Writing to %s in %s', target_file, target_dir)
-    if not os.path.exists(target_dir):
+    if target_dir and not os.path.exists(target_dir):
         os.makedirs(target_dir)
 
     # Decompress file if necessary
