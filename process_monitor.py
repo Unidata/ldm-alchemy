@@ -33,6 +33,7 @@ def dump_stats(client, proc):
 if __name__ == '__main__':
     import argparse
     import sys
+    from urllib.request import urlopen
 
     # Set up argument parsing
     parser = argparse.ArgumentParser(description='Monitor Python script stats.')
@@ -41,7 +42,9 @@ if __name__ == '__main__':
 
     proc_name = sys.argv[1]
 
-    client = boto3.client('cloudwatch')
+    endpoint = 'http://169.254.169.254/latest/meta-data/placement/availability-zone'
+    region_name = urlopen(endpoint).read().decode('utf-8')[:-1]
+    client = boto3.client('cloudwatch', region_name=region_name)
     try:
         proc = find_proc(args.name)
         if proc:
