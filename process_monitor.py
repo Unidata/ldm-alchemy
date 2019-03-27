@@ -33,26 +33,18 @@ def dump_stats(client, proc):
 if __name__ == '__main__':
     import argparse
     import sys
-    import time
 
     # Set up argument parsing
     parser = argparse.ArgumentParser(description='Monitor Python script stats.')
-    parser.add_argument('-i', '--interval', help='Monitoring interval in seconds', type=int,
-                        default=10)
     parser.add_argument('name', help='Name of script to monitor', type=str)
     args = parser.parse_args()
 
     proc_name = sys.argv[1]
 
     client = boto3.client('cloudwatch')
-    while True:
-        try:
-            proc = find_proc(args.name)
-            if not proc:
-                time.sleep(args.interval)
-            else:
-                while True:
-                    dump_stats(client, proc)
-                    time.sleep(args.interval)
-        except psutil.NoSuchProcess:
-            pass
+    try:
+        proc = find_proc(args.name)
+        if proc:
+            dump_stats(client, proc)
+    except psutil.NoSuchProcess:
+        pass
