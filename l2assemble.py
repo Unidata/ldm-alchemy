@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import os.path
+from pathlib import Path
 import shutil
 import struct
 import sys
@@ -41,16 +42,15 @@ class ProdInfoAdapter(logging.LoggerAdapter):
 
 def init_logger(formatter=None):
     import logging.handlers
-    import socket
 
     # Set the global logger
     logger = logging.getLogger('LDMHandler')
 
-    # Send logs to LDM's log if possible, otherwise send to stderr.
-    try:
-        handler = logging.handlers.SysLogHandler(address='/dev/log', facility='local0')
-    except (FileNotFoundError, socket.error):
-        handler = logging.StreamHandler()
+    # Send to our own rotating log in LDM's log directory
+    log_dir = Path(os.environ['HOME']) / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.TimedRotatingFileHandler(log_dir / 'l2assemble.log',
+                                                        when='midnight', backupCount=14)
 
     if formatter:
         handler.setFormatter(formatter)
@@ -62,8 +62,9 @@ def init_lv2_logger():
     import faulthandler
 
     # Set up some kind of logging for crashes
-    os.makedirs('logs', exist_ok=True)
-    faulthandler.enable(open('logs/l2assemble-crash.log', 'a'))
+    log_dir = Path(os.environ['HOME']) / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    faulthandler.enable(open(log_dir / 'l2assemble-crash.log', 'a'))
 
     fmt = '%(filename)s [%(funcName)s]: [%(site)s %(volume_id)03d] %(message)s'
     return init_logger(logging.Formatter(fmt=fmt))
