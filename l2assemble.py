@@ -66,8 +66,8 @@ def init_lv2_logger():
     log_dir.mkdir(parents=True, exist_ok=True)
     faulthandler.enable(open(log_dir / 'l2assemble-crash.log', 'a'))
 
-    fmt = '%(filename)s [%(funcName)s]: [%(site)s %(volume_id)03d] %(message)s'
-    return init_logger(logging.Formatter(fmt=fmt))
+    fmt = '%(asctime)s %(filename)s [%(funcName)s]: [%(site)s %(volume_id)03d] %(message)s'
+    return init_logger(logging.Formatter(fmt=fmt, datefmt='%b %d %H:%M:%S'))
 
 
 def log_rmtree_error(func, path, exc):
