@@ -7,9 +7,12 @@ import hashlib
 import logging
 import threading
 
+import botocore.exceptions
+
 from ldm_async import Job
 
 logger = logging.getLogger('LDM')
+
 
 class UploadS3(Job):
     def __init__(self, bucket, name='UploadS3'):
@@ -30,7 +33,7 @@ class UploadS3(Job):
 
                 # Write to S3
                 logger.info('Uploading to S3 under key: %s (md5: %s)', key, digest)
-                # bucket.put_object(Key=key, Body=item.data, ContentMD5=digest)
+                bucket.put_object(Key=key, Body=item.data, ContentMD5=digest)
             except botocore.exceptions.ClientError as e:
                 logger.exception('Error putting object on S3:', exception=e)
                 raise IOError from e
@@ -89,4 +92,3 @@ class SNSBucketPool(SharedObjectPool):
     def _create_new(self):
         import boto3
         return boto3.session.Session().resource('sns').Topic(self.sns_arn)
-
