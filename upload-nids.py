@@ -41,7 +41,7 @@ if __name__ == '__main__':
                         required=True)
     args = parser.parse_args()
 
-    logger = set_log_file('feed_s3.log')
+    logger = set_log_file('upload-nids.log')
     set_log_level(args)
 
     ldm = LDMReader(nthreads=args.threads)
