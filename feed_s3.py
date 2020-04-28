@@ -2,71 +2,17 @@
 # Copyright (c) 2015-2020 University Corporation for Atmospheric Research/Unidata
 # Distributed under the terms of the MIT License.
 # SPDX-License-Identifier: MIT
-
-import asyncio
-import functools
-import sys
+import base64
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+import hashlib
 import threading
 
-from contextlib import contextmanager
+import botocore.exceptions
 
-from ldm_async import set_log_file, LDMReader
+from ldm_async import set_log_file, Job, LDMReader
 
 logger = set_log_file('feed_s3.log')
-
-#
-# Coroutines for handling S3
-#
-def when_item_done(loop, queue, name, item, future):
-    try:
-        future.result()
-        logger.debug('Finished %s.', name)
-    except IOError:
-        logger.warning('Failed to process %s. Queuing for retry...', name)
-        loop.call_later(15, queue.put_nowait, item)
-    except Exception:
-        logger.exception('Item done exception:', exc_info=sys.exc_info())
-    finally:
-        queue.task_done()
-
-
-async def write_products_s3(loop, queue, bucket_pool, sns_pool):
-    while True:
-        product = await queue.get()
-        try:
-            key = args.key.format(product.prod_id)
-            logger.debug('Writing product to %s on S3 %s', key, bucket_pool.bucket_name)
-            fut = loop.run_in_executor(None, upload_product_s3, bucket_pool, key, product, sns_pool)
-            fut.add_done_callback(functools.partial(when_item_done, loop, queue, key, product))
-        except Exception:
-            logger.exception('write_products_s3 exception:', exc_info=sys.exc_info())
-
-
-def upload_product_s3(s3_pool, key, product, sns_pool):
-    with s3_pool.use() as bucket, sns_pool.use() as topic:
-        put_s3_checked(bucket, key, product.data)
-        # prod_info = product.prod_id
-        # message = {'S3Bucket': s3_pool.bucket_name, 'Key': key}
-        # message.update(prod_info.to_sns_message_dict())
-        # topic.publish(Message=json.dumps(message),
-        #               MessageAttributes=prod_info.to_sns_filter_attrs())
-
-
-def put_s3_checked(bucket, key, data, **kwargs):
-    import botocore.exceptions
-    import hashlib
-    import base64
-    try:
-        # Calculate MD5 checksum for integrity
-        digest = base64.b64encode(hashlib.md5(data).digest()).decode('ascii')
-
-        # Write to S3
-        logger.debug('Uploading to S3 under key: %s (md5: %s)', key, digest)
-        bucket.put_object(Key=key, Body=data, ContentMD5=digest, **kwargs)
-    except botocore.exceptions.ClientError as e:
-        logger.exception('Error putting object on S3:', exception=e)
-        raise IOError from e
-
 
 #
 # Pools for AWS access objects
@@ -126,39 +72,67 @@ class SNSBucketPool(SharedObjectPool):
         return boto3.session.Session().resource('sns').Topic(self.sns_arn)
 
 
-#
-# Argument parsing
-#
+class UploadS3(Job):
+    def __init__(self, bucket):
+        super().__init__('UploadS3')
+        self.bucket_pool = S3BucketPool(bucket)
+        # self.sns_pool = SNSBucketPool(args.sns)
+
+    @staticmethod
+    def prod_id_to_key(prod_id):
+        # SDUS85 KBOU 280642 /pN0MFTG !nids/
+        parts = prod_id.split(' ')
+        date_group = parts[2]
+        site_prod_group = parts[3]
+        day = int(date_group[:2])
+        hour = int(date_group[2:4])
+        minute = int(date_group[4:6])
+
+        # Use current datetime to fill in missing pieces of date/time. If we get an error,
+        # or get a time in the future, fall back to using yesterday's date.
+        now = datetime.utcnow()
+        try:
+            dt = now.replace(day=day, hour=hour, minute=minute, second=0, microsecond=0)
+            if dt > now:
+                raise ValueError
+        except ValueError:
+            now = now - timedelta(day=1)
+            dt = now.replace(day=day, hour=hour, minute=minute, second=0, microsecond=0)
+
+        prod = site_prod_group[2:5]
+        site = site_prod_group[5:8]
+        return (f'{site}/{prod}/{dt.year}/{dt.month}/{dt.day}/Level3_{site}_{prod}_'
+                f'{dt:%Y%m%d_%H%M}.nids')
+
+    def run(self, item):
+        with self.bucket_pool.use() as bucket:  #, sns_pool.use() as topic:
+            try:
+                # Calculate MD5 checksum for integrity
+                digest = base64.b64encode(hashlib.md5(item.data).digest()).decode('ascii')
+                key = self.prod_id_to_key(item.prod_id)
+
+                # Write to S3
+                logger.debug('Uploading to S3 under key: %s (md5: %s)', key, digest)
+                # bucket.put_object(Key=key, Body=item.data, ContentMD5=digest)
+            except botocore.exceptions.ClientError as e:
+                logger.exception('Error putting object on S3:', exception=e)
+                raise IOError from e
+
+
 def setup_arg_parser():
+    """Set up command line argument parsing."""
     import argparse
 
     # Set up argument parsing
-    parser = argparse.ArgumentParser(description='Read NEXRAD Level2 LDM compressed blocks'
-                                     ' and assemble when they are done arriving.')
-    parser.add_argument('-d', '--data_dir', help='Base output directory', type=str,
-                        default='/data/ldm/pub/native/radar/level2')
-    parser.add_argument('-s', '--s3', help='Write to specified S3 bucket rather than disk.',
-                        type=str)
-    parser.add_argument('--sns', help='When saving products, publish to this SNS topic',
-                        type=str, default='NewNEXRADLevel2ObjectFilterable')
-    parser.add_argument('--s3-volume-args', help='Additional arguments to pass when sending '
-                        ' volumes to S3. This is useful for passing along access controls.',
-                        type=str)
-    parser.add_argument('-k', '--key', help='Key format string when storing products. Uses '
-                        'Python string format specification',
-                        default='{0.site}/{0.volume_id}/{0.dt:%Y%m%d-%H%M%S}-'
-                                '{0.product_id:03d}-{0.product_type}')
+    parser = argparse.ArgumentParser(description='Upload products from LDM to AWS S3.')
+    parser.add_argument('-b', '--bucket', help='Bucket to upload files to', type=str,
+                        required=True)
     parser.add_argument('--threads', help='Specify number of threads to use.', default=20,
                         type=int)
     parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
                                                 'multiple times.', action='count', default=0)
     parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
                                               'multiple times.', action='count', default=0)
-    parser.add_argument('-p', '--path', help='Path format string. Uses Python '
-                        'string format specification', default='{0.site}/{0.dt:%Y%m%d}')
-    parser.add_argument('-n', '--filename', help='Filename format string. Uses Python '
-                        'string format specification',
-                        default='Level2_{0.site}_{0.dt:%Y%m%d_%H%M%S}.ar2v')
     parser.add_argument('other', help='Other arguments for LDM identification', type=str,
                         nargs='*')
     return parser
@@ -173,22 +147,6 @@ if __name__ == '__main__':
     logger.debug('Logging initialized.')
 
     ldm = LDMReader(nthreads=args.threads)
-
-    # tasks = []
-    #
-    # # Set up storing products internally
-    # product_queue = asyncio.Queue()
-    # queues = [product_queue]
-    #
-    # # If we need to save the products to s3, set that up as well
-    # if args.save_products:
-    #     import boto3
-    #     s3_queue = asyncio.Queue()
-    #     bucket_pool = S3BucketPool(args.save_products)
-    #     sns_pool = SNSBucketPool(args.sns)
-    #     tasks.append(asyncio.ensure_future(write_products_s3(loop, s3_queue, bucket_pool,
-    #                                                        sns_pool)))
-    #     queues.append(s3_queue)
-
+    ldm.connect(UploadS3(args.bucket))
     ldm.process()
 
