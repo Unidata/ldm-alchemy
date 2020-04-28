@@ -31,8 +31,7 @@ class UploadNIDS(UploadS3):
 
         prod = site_prod_group[2:5]
         site = site_prod_group[5:8]
-        return (f'{site}/{prod}/{dt.year}/{dt.month}/{dt.day}/Level3_{site}_{prod}_'
-                f'{dt:%Y%m%d_%H%M}.nids')
+        return f'{site}/{prod}/{dt:%Y/%m/%d}/Level3_{site}_{prod}_{dt:%Y%m%d_%H%M}.nids'
 
 
 if __name__ == '__main__':
