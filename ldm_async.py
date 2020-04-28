@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: MIT
 import asyncio
 from collections import namedtuple
+from concurrent.futures import ThreadPoolExecutor
 import logging
 from pathlib import Path
 import struct
+import sys
 
 
 def set_log_file(filename, when='midnight', backupCount=14):
@@ -137,29 +139,51 @@ async def read_product(stream):
 #
 # Handling of input
 #
-async def read_stream(loop, file, sinks, tasks):
-    stream_reader = asyncio.StreamReader(loop=loop)
-    transport, _ = await loop.connect_read_pipe(
-        lambda: asyncio.StreamReaderProtocol(stream_reader), file)
-    try:
+
+class LDMReader:
+    def __init__(self, *, nthreads=20):
+        self.nthreads = nthreads
+        self.sinks = []
+        self.tasks = []
+        self.queues = []
+
+    def process(self, stream=sys.stdin.buffer):
+        try:
+            self.loop = asyncio.get_event_loop()
+            self.loop.set_default_executor(ThreadPoolExecutor(self.nthreads))
+
+            self.tasks.append(asyncio.ensure_future(self.log_counts()))
+
+            # Add callback for stdin and start loop
+            logger.info('Starting main event loop.')
+            self.loop.run_until_complete(self.read_stream(stream))
+            self.loop.close()
+        except Exception as e:
+            logger.exception('Exception raised!', exc_info=e)
+
+    async def read_stream(self, stream):
+        stream_reader = asyncio.StreamReader(loop=self.loop)
+        transport, _ = await self.loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(stream_reader), stream)
+        try:
+            while True:
+                product = await read_product(stream_reader)
+                for sink in self.sinks:
+                    await sink.put(product)
+        except EOFError:
+            # If we get an EOF, flush out the queues top down, then save remaining
+            # products to disk for reloading later.
+            logger.warning('Finishing due to EOF.')
+            for sink in self.sinks:
+                logger.debug('Flushing product queue.')
+                await sink.join()
+            for t in self.tasks:
+                t.cancel()
+            await asyncio.sleep(0.01)  # Just enough to let other things close out
+            transport.close()
+
+    async def log_counts(self):
         while True:
-            product = await read_product(stream_reader)
-            for sink in sinks:
-                await sink.put(product)
-    except EOFError:
-        # If we get an EOF, flush out the queues top down, then save remaining
-        # products to disk for reloading later.
-        logger.warning('Finishing due to EOF.')
-        for sink in sinks:
-            logger.debug('Flushing product queue.')
-            await sink.join()
-        for t in tasks:
-            t.cancel()
-        await asyncio.sleep(0.01)  # Just enough to let other things close out
-        transport.close()
+            await asyncio.sleep(5)
+            logger.info('Tasks: %d', len(asyncio.Task.all_tasks(self.loop)))
 
-
-async def log_counts(loop):
-    while True:
-        await asyncio.sleep(300)
-        logger.info('Tasks: %d', len(asyncio.Task.all_tasks(loop)))

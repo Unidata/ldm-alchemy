@@ -10,7 +10,7 @@ import threading
 
 from contextlib import contextmanager
 
-from ldm_async import set_log_file
+from ldm_async import set_log_file, LDMReader
 
 logger = set_log_file('feed_s3.log')
 
@@ -165,8 +165,6 @@ def setup_arg_parser():
 
 
 if __name__ == '__main__':
-    from concurrent.futures import ThreadPoolExecutor
-
     args = setup_arg_parser().parse_args()
 
     # Figure out how noisy we should be. Start by clipping between -2 and 2.
@@ -174,35 +172,23 @@ if __name__ == '__main__':
     logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
     logger.debug('Logging initialized.')
 
-    try:
-        # Read directly from standard in buffer
-        read_in = sys.stdin.buffer
+    ldm = LDMReader(nthreads=args.threads)
 
-        # Set up event loop
-        loop = asyncio.get_event_loop()
-        loop.set_default_executor(ThreadPoolExecutor(args.threads))
+    # tasks = []
+    #
+    # # Set up storing products internally
+    # product_queue = asyncio.Queue()
+    # queues = [product_queue]
+    #
+    # # If we need to save the products to s3, set that up as well
+    # if args.save_products:
+    #     import boto3
+    #     s3_queue = asyncio.Queue()
+    #     bucket_pool = S3BucketPool(args.save_products)
+    #     sns_pool = SNSBucketPool(args.sns)
+    #     tasks.append(asyncio.ensure_future(write_products_s3(loop, s3_queue, bucket_pool,
+    #                                                        sns_pool)))
+    #     queues.append(s3_queue)
 
-        tasks = []
+    ldm.process()
 
-        # Set up storing products internally
-        product_queue = asyncio.Queue()
-        queues = [product_queue]
-
-        # If we need to save the products to s3, set that up as well
-        if args.save_products:
-            import boto3
-            s3_queue = asyncio.Queue()
-            bucket_pool = S3BucketPool(args.save_products)
-            sns_pool = SNSBucketPool(args.sns)
-            tasks.append(asyncio.ensure_future(write_products_s3(loop, s3_queue, bucket_pool,
-                                                               sns_pool)))
-            queues.append(s3_queue)
-
-        # Add task to periodically dump internal usage stats
-        tasks.append(asyncio.ensure_future(log_counts(loop)))
-
-        # Add callback for stdin and start loop
-        loop.run_until_complete(read_stream(loop, read_in, queues, tasks))
-        loop.close()
-    except Exception as e:
-        logger.exception('Exception raised!', exc_info=e)
