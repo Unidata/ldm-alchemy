@@ -5,3 +5,5 @@ full_feed
 *.ipynb
 data/
 logs/
+__pycache__/
+.vscode/
