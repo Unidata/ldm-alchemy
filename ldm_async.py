@@ -10,6 +10,7 @@ from pathlib import Path
 import struct
 import sys
 
+logger = logging.getLogger('LDM')
 
 def set_log_file(filename, when='midnight', backupCount=14):
     """Set up logging to a file.
@@ -41,7 +42,29 @@ def set_log_file(filename, when='midnight', backupCount=14):
     logger.addHandler(handler)
     return logger
 
-logger = logging.getLogger('LDM')
+def set_log_level(args):
+    """Set appropriate logging level based on command line args."""
+    # Figure out how noisy we should be. Start by clipping between -2 and 2.
+    total_level = min(2, max(-2, args.quiet - args.verbose))
+    logger.setLevel(30 + total_level * 10)  # Maps 2 -> 50, 1->40, 0->30, -1->20, -2->10
+    logger.debug('Logging initialized.')
+
+def setup_arg_parser(description):
+    """Set up command line argument parsing."""
+    import argparse
+
+    # Set up argument parsing
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument('--threads', help='Specify number of threads to use.', default=20,
+                        type=int)
+    parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
+                                                'multiple times.', action='count', default=0)
+    parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
+                                              'multiple times.', action='count', default=0)
+    parser.add_argument('other', help='Other arguments for LDM identification', type=str,
+                        nargs='*')
+    return parser
+
 
 #
 # Structures for decoding LDM binary metadata
