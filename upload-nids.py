@@ -5,14 +5,9 @@
 from datetime import datetime, timedelta
 
 from aws import UploadS3
-from ldm import remove_footer, remove_header
 from ldm_async import LDMReader, set_log_file, set_log_level, setup_arg_parser
 
 class UploadNIDS(UploadS3):
-    def run(self, item):
-        data = remove_footer(remove_header(item.data))
-        super().run(item._replace(data=data))
-
     @staticmethod
     def prod_id_to_key(prod_id):
         # SDUS85 KBOU 280642 /pN0MFTG !nids/
