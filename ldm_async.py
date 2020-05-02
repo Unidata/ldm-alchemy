@@ -38,6 +38,8 @@ def set_log_file(filename, when='midnight', backupCount=14):
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.TimedRotatingFileHandler(log_dir / filename, when=when,
                                                         backupCount=backupCount)
+    handler.setFormatter(logging.Formatter('%(asctime)s %(filename)s [%(funcName)s]: '
+                                           '%(message)s'))
 
     logger.addHandler(handler)
     return logger
