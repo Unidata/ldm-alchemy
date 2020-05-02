@@ -21,7 +21,7 @@ class UploadS3(Job):
         # self.sns_pool = SNSBucketPool(args.sns)
 
     @staticmethod
-    def prod_id_to_key(prod_id):
+    def make_key(prod_id, data):
         return prod_id
 
     def run(self, item):
@@ -29,7 +29,7 @@ class UploadS3(Job):
             try:
                 # Calculate MD5 checksum for integrity
                 digest = base64.b64encode(hashlib.md5(item.data).digest()).decode('ascii')
-                key = self.prod_id_to_key(item.prod_id)
+                key = self.prod_id_to_key(*item)
 
                 # Write to S3
                 logger.info('Uploading to S3 under key: %s (md5: %s)', key, digest)
