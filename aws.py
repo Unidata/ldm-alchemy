@@ -32,7 +32,7 @@ class UploadS3(Job):
                 key = self.prod_id_to_key(*item)
 
                 # Write to S3
-                logger.info('Uploading to S3 under key: %s (md5: %s)', key, digest)
+                logger.info('Uploading to S3 as: %s', key)
                 bucket.put_object(Key=key, Body=item.data, ContentMD5=digest)
             except botocore.exceptions.ClientError as e:
                 logger.exception('Error putting object on S3:', exc_info=e)
