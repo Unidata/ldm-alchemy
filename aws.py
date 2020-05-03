@@ -9,9 +9,9 @@ import threading
 
 import botocore.exceptions
 
-from ldm_async import Job
+from async_base import Job
 
-logger = logging.getLogger('LDM')
+logger = logging.getLogger('alchemy.aws')
 
 
 class UploadS3(Job):

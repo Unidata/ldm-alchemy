@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: MIT
 import asyncio
 from collections import namedtuple
-from concurrent.futures import ThreadPoolExecutor
-import functools
 import logging
 from pathlib import Path
 import struct
 import sys
 
-logger = logging.getLogger('LDM')
+from async_base import Main
+
+logger = logging.getLogger('alchemy')
 
 def set_log_file(filename, when='midnight', backupCount=14):
     """Set up logging to a file.
@@ -170,99 +170,20 @@ async def read_product(stream):
 # Handling of input
 #
 
-class LDMReader:
-    def __init__(self, *, nthreads=20):
-        self.nthreads = nthreads
-        self.sinks = []
-        self.tasks = []
-
-    def add_standalone_task(self, async_func):
-        task = asyncio.ensure_future(async_func())
-        self.tasks.append(task)
-
-    def connect(self, dest):
-        task = asyncio.ensure_future(dest.mainloop())
-        self.tasks.append(task)
-        self.sinks.append(dest.queue)
-
-    def process(self, stream=sys.stdin.buffer):
-        try:
-            # Get the default loop and add an executor for running synchronous code
-            self.loop = asyncio.get_event_loop()
-            self.loop.set_default_executor(ThreadPoolExecutor(self.nthreads))
-
-            # Add a debugging task that shows the current task count
-            self.add_standalone_task(self.log_tasks)
-
-            # Run our main task until it finishes
-            logger.info('Starting main event loop.')
-            self.loop.run_until_complete(self.read_stream(stream))
-
-            # Close up
-            self.loop.close()
-        except Exception as e:
-            logger.exception('Exception raised!', exc_info=e)
-
-    async def read_stream(self, stream):
-        # Set up an async way to read data from our stream
-        stream_reader = asyncio.StreamReader(loop=self.loop)
-        transport, _ = await self.loop.connect_read_pipe(
+async def product_generator(loop, stream):
+    stream_reader = asyncio.StreamReader(loop=loop)
+    transport, _ = await loop.connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(stream_reader), stream)
 
-        # Continuously loop, reading products and sending them to connected tasks
-        try:
-            while True:
-                product = await read_product(stream_reader)
-                for sink in self.sinks:
-                    await sink.put(product)
-        except EOFError:
-            # If we get an EOF, flush out the queues top down, then save remaining
-            # products to disk for reloading later.
-            logger.warning('Finishing due to EOF.')
-            for sink in self.sinks:
-                logger.debug('Flushing product queue.')
-                await sink.join()
-            for t in self.tasks:
-                t.cancel()
-            await asyncio.sleep(0.05)  # Just enough to let other things close out
-            transport.close()
-
-    async def log_tasks(self):
+    try:
         while True:
-            await asyncio.sleep(60)
-            logger.info('Tasks: %d', len(asyncio.Task.all_tasks(self.loop)))
+            product = await read_product(stream_reader)
+            yield product
+    except EOFError:
+        logger.warning('Finishing due to EOF.')
+        transport.close()
 
 
-class Job:
-    def __init__(self, name):
-        self.name = name
-        self.queue = asyncio.Queue()
-        self.loop = asyncio.get_event_loop()
-
-    async def mainloop(self):
-        while True:
-            item = await self.queue.get()
-            try:
-                fut = self.loop.run_in_executor(None, self.run, item)
-                fut.add_done_callback(functools.partial(self.done_callback, item))
-            except Exception:
-                logger.exception(f'Exception executing task {self.name}:',
-                                 exc_info=sys.exc_info())
-
-    def done_callback(self, item, future):
-        try:
-            res = future.result()
-            self.finish(item, res)
-        except IOError:
-            logger.warning('Failed to process %s. Queuing for retry...', item)
-            self.loop.call_later(15, self.queue.put_nowait, item)
-        except Exception:
-            logger.exception('Exception on finishing item %s:', item, exc_info=sys.exc_info())
-        finally:
-            self.queue.task_done()
-
-    def run(self, item):
-        logger.debug('Processing %s...', item)
-
-    def finish(self, item, result):
-        logger.debug('Finished %s.', item)
+class LDMReader(Main):
+    def __aiter__(self):
+        return product_generator(self.loop, sys.stdin.buffer)

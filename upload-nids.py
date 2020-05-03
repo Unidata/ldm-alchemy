@@ -56,4 +56,4 @@ if __name__ == '__main__':
 
     ldm = LDMReader(nthreads=args.threads)
     ldm.connect(UploadNIDS(args.bucket))
-    ldm.process()
+    ldm.run()
