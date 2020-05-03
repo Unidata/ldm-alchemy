@@ -29,7 +29,7 @@ class UploadS3(Job):
             try:
                 # Calculate MD5 checksum for integrity
                 digest = base64.b64encode(hashlib.md5(item.data).digest()).decode('ascii')
-                key = self.prod_id_to_key(*item)
+                key = self.make_key(*item)
 
                 # Write to S3
                 logger.info('Uploading to S3 as: %s', key)

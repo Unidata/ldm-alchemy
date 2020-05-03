@@ -33,7 +33,7 @@ def read_volume_time(buff):
 
 class UploadNIDS(UploadS3):
     @staticmethod
-    def prod_id_to_key(prod_id, data):
+    def make_key(prod_id, data):
         # Get the proper datetime by parsing from the product since we have it in memory
         dt = read_volume_time(handle_zlib(remove_header(data)))
 
