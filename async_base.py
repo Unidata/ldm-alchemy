@@ -75,7 +75,7 @@ class Main:
 class Job:
     def __init__(self, name):
         self.name = name
-        self.queue = asyncio.Queue()
+        self.queue = asyncio.Queue(maxsize=10000)
         self.loop = asyncio.get_event_loop()
 
     async def mainloop(self):
