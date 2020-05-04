@@ -35,7 +35,6 @@ if __name__ == '__main__':
     logger.addHandler(logging.StreamHandler())
     set_log_level(args)
 
-    reader = S3Reader(bucket=args.bucket, nthreads=args.threads,
-                      Marker='MAF/', count=2)
+    reader = S3Reader(bucket=args.bucket, nthreads=args.threads)
     reader.connect(RenameNIDS(args.bucket))
     reader.run()
