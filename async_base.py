@@ -11,7 +11,9 @@ logger = logging.getLogger('alchemy.async')
 
 class Main:
     """Sets up main processing for async processing pipeline."""
-    def __init__(self, *, nthreads=20):
+    def __init__(self, *, nthreads=None):
+        if nthreads is None:
+            nthreads = 20
         self.nthreads = nthreads
         self.sinks = []
         self.tasks = []

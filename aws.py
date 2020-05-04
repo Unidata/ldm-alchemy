@@ -1,15 +1,17 @@
 # Copyright (c) 2020 University Corporation for Atmospheric Research/Unidata.
 # Distributed under the terms of the MIT License.
 # SPDX-License-Identifier: MIT
+import asyncio
 import base64
 from contextlib import contextmanager
 import hashlib
 import logging
 import threading
 
+import boto3
 import botocore.exceptions
 
-from async_base import Job
+from async_base import Job, Main
 
 logger = logging.getLogger('alchemy.aws')
 
@@ -92,3 +94,19 @@ class SNSBucketPool(SharedObjectPool):
     def _create_new(self):
         import boto3
         return boto3.session.Session().resource('sns').Topic(self.sns_arn)
+
+
+async def read_s3_objects(bucket, count=None, **kwargs):
+    for obj in bucket.objects.filter(**kwargs).limit(count):
+        yield obj
+        await asyncio.sleep(0.01)
+
+
+class S3Reader(Main):
+    def __init__(self, bucket, **kwargs):
+        self.bucket = boto3.session.Session().resource('s3').Bucket(bucket)
+        super().__init__(nthreads=kwargs.pop('nthreads'))
+        self.filter_kwargs = kwargs
+
+    def __aiter__(self):
+        return read_s3_objects(self.bucket, **self.filter_kwargs)
