@@ -8,9 +8,6 @@ logger = logging.getLogger('alchemy')
 
 
 class RenameNIDS(UploadNIDS):
-    def __init__(self, name='ReadProduct'):
-        super().__init__(name)
-
     def run(self, item):
         if 'Level3' not in item.key:
             logger.debug('Skipping %s', item.key)
