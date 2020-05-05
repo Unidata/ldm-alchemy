@@ -99,7 +99,7 @@ class SNSBucketPool(SharedObjectPool):
 async def read_s3_objects(bucket, count=None, **kwargs):
     for obj in bucket.objects.filter(**kwargs).limit(count):
         yield obj
-        await asyncio.sleep(0.000001)
+        await asyncio.sleep(0.001)
 
 
 class S3Reader(Main):
