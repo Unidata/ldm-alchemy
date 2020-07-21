@@ -13,6 +13,7 @@ import os
 import os.path
 import sys
 import tempfile
+from subprocess import Popen
 
 from netCDF4 import Dataset, date2num
 import numpy as np
@@ -190,12 +191,14 @@ class AssemblerManager(defaultdict):
     Dispatches tiles that have arrived and dispatches them to the appropriate
     file assembler, creating them as necessary.
     """
-    def __init__(self, out_dir, timeout, filename_template, loop):
+    def __init__(self, out_dir, timeout, filename_template, execute, pass_filename, loop):
         super().__init__()
         self.out_dir = out_dir
         self.timeout = timeout
         self.loop = loop
         self.filename = filename_template
+        self.execute = execute
+        self.pass_filename = pass_filename
 
     def __missing__(self, key):
         new = self._create_store(key)
@@ -230,6 +233,15 @@ class AssemblerManager(defaultdict):
 
     def store_done(self, key):
         logger.info('%s finished.', key)
+        if self.execute:
+            cmd = [self.execute]
+            if self.pass_filename:
+                cmd.append(key)
+            try:
+                Popen(cmd, start_new_session=True)
+                logger.info('%s has started.', self.execute)
+            except expression as identifier:
+                logger.exception('Exception raised executing script: ', exc_info=sys.exc_info())
         self.pop(key)
 
 
@@ -359,6 +371,10 @@ def setup_arg_parser():
                                              '{channel:.2f}_{resolution}_{lat}_{lon}.nc4'))
     parser.add_argument('-l', '--log', help='Filename to log information to. Uses standard'
                         ' out if not given.', type=str, default='')
+    parser.add_argument('-e', '--execute', help='Command or script to execute after a'
+                                            'data set is finalized.', type=str, default=None)
+    parser.add_argument('-p', '--pass_filename', help='Will pass filename as an arguement '
+                                'to exec script if --execute is set.', action="store_true")
     parser.add_argument('other', help='Other arguments for LDM identification', type=str,
                         nargs='*')
     return parser
@@ -380,7 +396,7 @@ if __name__ == '__main__':
 
     # Set up event loop
     loop = asyncio.get_event_loop()
-    manager = AssemblerManager(args.data_dir, args.timeout, args.filename, loop)
+    manager = AssemblerManager(args.data_dir, args.timeout, args.filename, args.execute, args.pass_filename, loop)
     queues = [manager]
 
     # Try to catch core dumps
