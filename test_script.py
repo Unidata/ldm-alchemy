@@ -4,7 +4,12 @@
 # SPDX-License-Identifier: MIT
 
 import bz2
+from datetime import datetime
+import functools
+from itertools import cycle, islice
+import random
 import struct
+
 
 meta_struct = struct.Struct('6IQiII')
 len_struct = struct.Struct('I')
@@ -20,11 +25,17 @@ def make_block(data):
     return len_struct.pack(len(comp)) + comp
 
 
+@functools.lru_cache(1024)
+def get_vol_time(radar, vol):
+    return datetime.utcnow()
+
+
 def write_chunk(out, radar, vol, chunk, typ):
-    block = make_block(b'p' * 50)
+    block = make_block(random.randbytes(100 * 1024))
     if typ == 'S':
         block = b'1' * 24 + block
-    prod_id = 'L2-BZIP2/%s/20150908215946/%d/%d/%s/V06/0' % (radar, vol, chunk, typ)
+    dt = get_vol_time(radar, vol)
+    prod_id = f'L2-BZIP2/{radar}/{dt:%Y%m%d%H%M%S}/{vol}/{chunk}/{typ}/V06/0'
     origin = 'foobar'
     out.write(meta_struct.pack(meta_struct.size + 2 * len_struct.size + len(prod_id) + len(origin),
                                1, 2, 3, 4, len(block), 1, 1, 1, 2))
@@ -34,38 +45,70 @@ def write_chunk(out, radar, vol, chunk, typ):
     out.flush()
 
 
+# From official itertools 3.9 docs
+def roundrobin(*iterables):
+    "roundrobin('ABC', 'D', 'EF') --> A D E B F C"
+    # Recipe credited to George Sakkis
+    num_active = len(iterables)
+    nexts = cycle(iter(it).__next__ for it in iterables)
+    while num_active:
+        try:
+            for next in nexts:
+                yield next()
+        except StopIteration:
+            # Remove the iterator we just exhausted from the cycle.
+            num_active -= 1
+            nexts = cycle(islice(nexts, num_active))
+
+
+def vols(radar, n):
+    start = random.randint(0, 999 - n)
+    for vol in range(start, start + n):
+        num_chunks = random.randint(30, 100)
+        for chunk in range(1, num_chunks + 1):
+            code = 'S' if chunk == 1 else 'E' if chunk == num_chunks else 'I'
+            yield radar, vol, chunk, code
+
+
 if __name__ == '__main__':
+    import argparse
+    import string
     import subprocess
     import sys
     import time
 
-    timeout = False
-    sig_hup = False
-    if len(sys.argv) > 1:
-        if sys.argv[1] == 'timeout':
-            timeout = True
-        elif sys.argv[1] == 'hup':
-            sig_hup = True
+    parser = argparse.ArgumentParser(description='Test l2assemble.')
+    parser.add_argument('stop', type=str, nargs='?', help='Optional stop method.')
+    parser.add_argument('--radars', '-r', type=int, default=10,
+                        help='Number of radars to simulate')
+    parser.add_argument('--volumes', '-v', type=int, default=5,
+                        help='Number of volumes to generate per radar')
+    args = parser.parse_args()
 
-    radar = 'KFTG'
-    vol = 494
-    time_val = 10
-    proc = subprocess.Popen(['./l2assemble.py', '-vv', '-d', '.',
+    timeout = args.stop == 'timeout'
+    sig_hup = args.stop == 'hup'
+    spacing = 6
+    num_radars = args.radars
+    radars = ('K' + ''.join(random.choice(string.ascii_uppercase) for _ in range(3))
+              for _ in range(num_radars))
+    time_val = 5 * spacing
+    proc = subprocess.Popen(['./l2assemble.py', '-vv', '-d', 'data',
                              '-t', str(time_val)],
                             stdout=sys.stdout, stdin=subprocess.PIPE, universal_newlines=False,
                             bufsize=40)
 
-    write_chunk(proc.stdin, radar, vol, 1, 'S')
-    for chunk in range(2, 3):
-        write_chunk(proc.stdin, radar, vol, chunk, 'I')
-        time.sleep(0.25)
-    else:
-        if not (timeout or sig_hup):
-            write_chunk(proc.stdin, radar, vol, chunk + 1, 'E')
+    for radar, vol, chunk, code in roundrobin(*(vols(r, args.volumes) for r in radars)):
+        if radar is None:
+            continue
+        if not (timeout or sig_hup and code == 'E'):
+            write_chunk(proc.stdin, radar, vol, chunk, code)
+            time.sleep(random.gauss(spacing / num_radars, 0.2 * spacing / num_radars))
+        else:
+            break
 
     proc.stdin.flush()
     if timeout:
-        time.sleep(timeout + 15)
+        time.sleep(time_val + 15)
 
     proc.stdin.close()
     proc.wait()
