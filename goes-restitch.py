@@ -39,22 +39,46 @@ def copy_attrs(src, dest, skip):
 
 def dataset_name(dataset, template):
     r"""Create an appropriate file path from a GOES dataset."""
-    sat_id = dataset.satellite_id.replace('-', '')
-    channel = dataset.central_wavelength
+#// global attributes:
+#		:title = "Sectorized Cloud and Moisture Imagery for the WFDM3 region." ;
+#		:ICD_version = "GROUND SEGMENT (GS) TO ADVANCED WEATHER INTERACTIVE PROCESSING SYSTEM (AWIPS) INTERFACE CONTROL DOCUMENT (ICD) Revision B" ;
+#		:Conventions = "CF-1.6" ;
+#		:channel_id = 15 ;
+#		:central_wavelength = 12.3f ;
+#		:abi_mode = 3 ;
+#		:source_scene = "FullDisk" ;
+#		:periodicity = 15.f ;
+#		:production_location = "WCDAS" ;
+#		:product_name = "WFD-060-B12-M3C15" ;
+#		:satellite_id = "GOES-17" ;
+#		:product_center_latitude = 0. ;
+#		:product_center_longitude = -137. ;
+#		:projection = "Fixed Grid" ;
+#		:bit_depth = 12 ;
+#		:source_spatial_resolution = 2.f ;
+#		:request_spatial_resolution = 6.f ;
+#		:start_date_time = "2019086160038" ;
+#		:number_product_tiles = 4 ;
+#		:tile_center_latitude = 22.5093750854732 ;
+#		:tile_center_longitude = -161.363571074665 ;
+#		:product_tile_width = 1024 ;
+#		:product_tile_height = 1024 ;
+#		:product_rows = 1808 ;
+#		:product_columns = 1808 ;
+#		:pixel_x_size = 6. ;
+#		:pixel_y_size = 6. ;
+#		:tile_row_offset = 0 ;
+#		:tile_column_offset = 0 ;
+#		:satellite_latitude = 0. ;
+#		:satellite_longitude = -137. ;
+#		:satellite_altitude = 35786023. ;
+
+    # Extract needed values from global attributes
+    satellite  = dataset.satellite_id.replace('-', '')
+    sat_id     = dataset.satellite_id.replace('OES-', '')
     channel_id = dataset.channel_id
-
-    # Get a resolution string like 500m or 1km
-    if dataset.request_spatial_resolution >= 1.0:
-        resolution = '{:.0f}km'.format(dataset.request_spatial_resolution)
-    else:
-        resolution = '{}m'.format(int(dataset.request_spatial_resolution * 10) * 100)
-
-    # Get lon/lat out to 1 decimal point
-    center_lat = '{0:.1f}{1}'.format(np.fabs(dataset.product_center_latitude),
-                                     'N' if dataset.product_center_latitude > 0 else 'S')
-    center_lon = '{0:.1f}{1}'.format(np.fabs(dataset.product_center_longitude),
-                                     'E' if dataset.product_center_longitude > 0 else 'W')
-    scene = dataset.source_scene
+    abi_mode   = dataset.abi_mode
+    scene      = dataset.source_scene
 
     # Need special handling for full disk images to better name NWS regional images
     if scene == 'FullDisk':
@@ -67,13 +91,36 @@ def dataset_name(dataset, template):
         # TCONUS is just CONUS from the mode 4 full disk
         if region.endswith('CONUS'):
             scene = 'CONUS'
+
+        # Not CONUS or FullDisk
         elif not region.endswith('FD'):
             scene = region
 
+    # Coverage and redefine some scene names
+    if scene == "CONUS":
+        covr = 'C'
+    elif scene == "FullDisk":
+        covr = 'F'
+    elif scene == "Mesoscale-1":
+        covr = 'M1'
+    elif scene == "Mesoscale-2":
+        covr = 'M2'
+    elif scene == "PRREGI":
+        covr = 'PR'
+        scene = 'PuertoRico'
+    elif scene == "AKREGI":
+        covr = 'AK'
+        scene = 'Alaska'
+    elif scene == "HIREGI":
+        covr = 'HI'
+        scene = 'Hawaii'
+
     # Parse start time into something we can use
     dt = goes_time_to_dt(dataset.start_date_time)
-    return template.format(satellite=sat_id, channel=channel, resolution=resolution, dt=dt,
-                           scene=scene, lat=center_lat, lon=center_lon, channel_id=channel_id)
+
+    logger.debug(template.format(band=channel_id, mode=abi_mode, scene=scene, satellite=satellite, sat=sat_id, covr=covr, dt=dt))
+
+    return template.format(band=channel_id, mode=abi_mode, scene=scene, satellite=satellite, sat=sat_id, covr=covr, dt=dt)
 
 
 def init_nc_file(source_nc, output_nc):
@@ -157,7 +204,7 @@ def find_files(source_dir):
     r"""Find all the netCDF4 files in a directory tree."""
     for root, dirs, files in os.walk(source_dir):
         for fname in sorted(files):
-            if not fname.endswith('nc4'):
+            if not fname.endswith('nc'):
                 continue
             ds = Dataset(os.path.join(root, fname))
             yield ds
@@ -240,7 +287,7 @@ class AssemblerManager(defaultdict):
             try:
                 Popen(cmd, start_new_session=True)
                 logger.info('%s has started.', self.execute)
-            except expression as identifier:
+            except Exception:
                 logger.exception('Exception raised executing script: ', exc_info=sys.exc_info())
         self.pop(key)
 
@@ -271,6 +318,8 @@ class Assembler:
 
                 # Rename temporary file to final name if necessary
                 if old_name != self.output_name:
+                    logger.debug(old_name)
+                    logger.debug(self.output_name)
                     logger.debug('Renaming output %s to %s', old_name, self.output_name)
                     os.rename(old_name, self.output_name)
             except Exception:
@@ -285,8 +334,10 @@ class Assembler:
                 logger.debug('Processing product: %s', product.filepath())
                 try:
                     if not self.output:
+                        logger.debug(self.template)
                         self.output_name = os.path.join(self.out_dir,
                                                         dataset_name(product, self.template))
+                        logger.debug(self.output_name)
 
                         # Open file if it exists, otherwise create it
                         if os.path.exists(self.output_name):
@@ -350,31 +401,39 @@ def read_netcdf_from_memory(mem):
 def setup_arg_parser():
     import argparse
 
+    # Example invocation:
+    #
+    # -------------------------------------
+    # - NOAAPORT GOES-16 netCDF4 Data -
+    # -------------------------------------
+    #
+    #NOTHER  (^TI..).. KNES ([0-9][0-9][0-9][0-9][0-9][0-9]) ...
+    #        PIPE    -metadata
+    #        util/goes-restitch.py -v -d /data/ldm/pub/native/satellite/GOES -t 120 -l logs/goes-restitch/\1.log \1 \2
+
     # Set up argument parsing
     parser = argparse.ArgumentParser(description='Assemble netCDF4 tiles of GOES data into '
                                                  'single files.')
     parser.add_argument('-d', '--data_dir', help='Base output directory', type=str,
                         default='/data/ldm/pub/native/satellite/GOES')
     parser.add_argument('-t', '--timeout', help='Timeout in seconds for waiting for data',
-                        default=15, type=int)
+                        default=60, type=int)
     parser.add_argument('-s', '--source', help='Source directory for data tiles', type=str,
                         default='')
     parser.add_argument('-v', '--verbose', help='Make output more verbose. Can be used '
                                                 'multiple times.', action='count', default=0)
     parser.add_argument('-q', '--quiet', help='Make output quieter. Can be used '
                                               'multiple times.', action='count', default=0)
-    parser.add_argument('-f', '--filename', help='Filename format string. Uses Python '
-                        'string format specification',
+    parser.add_argument('-f', '--filename', help='Filename format string. Uses Python string format specification',
                         default=os.path.join('{satellite}', '{scene}',
-                                             'Channel{channel_id:02d}', '{dt:%Y%m%d}',
-                                             '{satellite}_{scene}_{dt:%Y%m%d}_{dt:%H%M%S}_'
-                                             '{channel:.2f}_{resolution}_{lat}_{lon}.nc4'))
+                                             'Channel{band:02d}', '{dt:%Y%m%d}',
+                                             'OR_ABI-L2-CMIP{covr}-M{mode}C{band:02d}_{sat}_s{dt:%Y%j%H%M%S}0_e{dt:%Y%j%H%M%S}0_c{dt:%Y%j%H%M%S}0.nc'))
     parser.add_argument('-l', '--log', help='Filename to log information to. Uses standard'
                         ' out if not given.', type=str, default='')
     parser.add_argument('-e', '--execute', help='Command or script to execute after a'
-                                            'data set is finalized.', type=str, default=None)
+                        'data set is finalized.', type=str, default=None)
     parser.add_argument('-p', '--pass_filename', help='Will pass filename as an arguement '
-                                'to exec script if --execute is set.', action="store_true")
+                        'to exec script if --execute is set.', action="store_true")
     parser.add_argument('other', help='Other arguments for LDM identification', type=str,
                         nargs='*')
     return parser
@@ -383,7 +442,8 @@ def setup_arg_parser():
 if __name__ == '__main__':
     args = setup_arg_parser().parse_args()
 
-    fmt = '[' + ' '.join(args.other) + '] %(asctime)s [%(funcName)s]: %(message)s'
+    # fmt = '[' + ' '.join(args.other) + '] %(asctime)s [%(funcName)s]: %(message)s'
+    fmt = "%(asctime)s %(levelname)-8s - %(lineno)4d:%(module)s/%(funcName)-21s - %(message)s"
     if os.path.sep in args.log:
         os.makedirs(os.path.dirname(args.log), exist_ok=True)
 
