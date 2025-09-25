@@ -49,10 +49,14 @@ def setup_arg_parser():
 
 # Find WMO header and remove
 def remove_header(block):
-    data = block[:64].decode('utf-8', 'ignore')
-    match = re.search('\x01\r\r\n[\w\d\s]{4}\r\r\n\w{4}\d{2} \w{4} \d{6}[\s\w\d]*\r\r\n', data)
+    data = block[:64]
+    match = re.search(r'\x01\r\r\n[\w\d\s]{4}\r\r\n\w{4}\d{2} \w{4} \d{6}[\s\w\d\r]*\r\r\n',
+                      data.decode('utf-8', 'ignore'))
     if match:
         return block[match.end():]
+    # WMO block regex didn't match, see if we can see magic bytes for HDF5/netCDF
+    elif ind := data.find(b'\x89HDF'):
+        return block[ind:]
     else:
         return block
 
